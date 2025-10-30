@@ -7,7 +7,7 @@ const path = require('path');
 const fs = require('fs');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const helmet = require('helmet');
+// helmet is optional; set critical headers manually to avoid runtime deps issues
 const rateLimit = require('express-rate-limit');
 let RedisStore;
 try { RedisStore = require('rate-limit-redis').RedisStore; } catch {}
@@ -29,26 +29,27 @@ const CAPTCHA_REQUIRED = (process.env.CAPTCHA_REQUIRED || 'false') === 'true';
 
 // Middleware
 app.disable('x-powered-by');
-app.use(helmet({
-  contentSecurityPolicy: {
-    useDefaults: true,
-    directives: {
-      defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", 'https://challenges.cloudflare.com', "'unsafe-inline'"],
-      styleSrc: ["'self'", "'unsafe-inline'"],
-      imgSrc: ["'self'", 'data:', 'https:'],
-      connectSrc: ["'self'", '*'],
-      frameSrc: ['https://challenges.cloudflare.com'],
-      objectSrc: ["'none'"],
-      baseUri: ["'self'"]
-    }
-  },
-  referrerPolicy: { policy: 'no-referrer' },
-  frameguard: { action: 'deny' },
-  dnsPrefetchControl: { allow: false },
-  crossOriginOpenerPolicy: { policy: 'same-origin' },
-  crossOriginResourcePolicy: { policy: 'same-site' }
-}));
+app.use((req, res, next) => {
+  // Security headers similar to helmet defaults
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-DNS-Prefetch-Control', 'off');
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-site');
+  // CSP tuned for our app and Turnstile widget
+  const csp = [
+    "default-src 'self'",
+    "script-src 'self' https://challenges.cloudflare.com 'unsafe-inline'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: https:",
+    "connect-src 'self' *",
+    "frame-src https://challenges.cloudflare.com",
+    "object-src 'none'",
+    "base-uri 'self'"
+  ].join('; ');
+  res.setHeader('Content-Security-Policy', csp);
+  next();
+});
 app.use((req, res, next) => {
   res.setHeader('X-Robots-Tag', 'noindex, nofollow');
   next();
