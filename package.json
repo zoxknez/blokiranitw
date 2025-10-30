@@ -4,12 +4,13 @@
   "description": "Modern web app for searching blocked Twitter users",
   "main": "server/index.js",
   "scripts": {
+    "start": "node server/index.js",
     "dev": "concurrently \"npm run server\" \"npm run client\"",
     "server": "cd server && npm run dev",
     "client": "cd client && npm start",
     "build": "npm run install-all && cd client && npm run build",
-    "install-all": "npm install && cd server && npm install && cd ../client && npm install",
-    "postinstall": "cd client && npm install"
+    "install-all": "npm install && cd server && npm ci && cd ../client && npm ci",
+    "postinstall": "cd server && npm ci && cd ../client && npm ci"
   },
   "keywords": ["twitter", "blocked-users", "search", "react", "nodejs"],
   "author": "Your Name",
