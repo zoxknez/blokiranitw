@@ -1,0 +1,22 @@
+# Use .gitignore-style patterns
+# Exclude development and misc
+.git/
+.vscode/
+.DS_Store
+*.log
+.vercel/
+
+# Exclude client app from API container image
+client/
+
+# Exclude local node_modules (they will be installed in build)
+node_modules/
+server/node_modules/
+client/node_modules/
+
+# Ensure server and root manifest files are included
+!server/**
+!package.json
+!package-lock.json
+!railway.toml
+!README.md
