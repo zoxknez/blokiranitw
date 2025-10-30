@@ -921,14 +921,44 @@ app.put('/api/admin/suggestions/:id/reject', adminWriteLimiter, authenticateToke
   );
 });
 
-// Serve static files in production
+// Serve static files in production only if build exists; otherwise expose simple root
 if (process.env.NODE_ENV === 'production') {
-  app.use(express.static(path.join(__dirname, '../client/build')));
-  
-  app.get('*', (req, res) => {
-    res.sendFile(path.join(__dirname, '../client/build', 'index.html'));
+  const buildDir = path.join(__dirname, '../client/build');
+  if (fs.existsSync(buildDir)) {
+    app.use(express.static(buildDir));
+    app.get('*', (req, res, next) => {
+      const indexPath = path.join(buildDir, 'index.html');
+      if (fs.existsSync(indexPath)) {
+        return res.sendFile(indexPath);
+      }
+      return res.status(200).json({ service: 'api', ok: true });
+    });
+  } else {
+    app.get('/', (req, res) => {
+      res.status(200).json({ service: 'api', ok: true });
+    });
+  }
+} else {
+  app.get('/', (req, res) => {
+    res.status(200).json({ service: 'api', ok: true });
   });
 }
+
+// Global error handler to avoid crashes
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+app.use((err, req, res, next) => {
+  try {
+    console.error('Unhandled error:', err?.message || err);
+  } catch {}
+  res.status(500).json({ error: 'Internal Server Error' });
+});
+
+process.on('unhandledRejection', (reason) => {
+  try { console.error('unhandledRejection', reason); } catch {}
+});
+process.on('uncaughtException', (err) => {
+  try { console.error('uncaughtException', err); } catch {}
+});
 
 app.listen(PORT, HOST, () => {
   console.log(`Server running on http://${HOST}:${PORT}`);
