@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { 
   CheckCircle, 
   XCircle, 
@@ -28,7 +28,7 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ isOpen, onClose }) => {
   const [status, setStatus] = useState<'pending' | 'approved' | 'rejected'>('pending');
   const [isLoading, setIsLoading] = useState(false);
 
-  const loadSuggestions = async (page = 1, newStatus = status) => {
+  const loadSuggestions = useCallback(async (page = 1, newStatus = status) => {
     setIsLoading(true);
     try {
       const response = await suggestionService.getSuggestions(newStatus, page, 20);
@@ -39,14 +39,13 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ isOpen, onClose }) => {
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [status]);
 
   useEffect(() => {
     if (isOpen) {
-      // eslint-disable-next-line react-hooks/exhaustive-deps
       loadSuggestions();
     }
-  }, [isOpen]);
+  }, [isOpen, loadSuggestions]);
 
   const handleStatusChange = (newStatus: 'pending' | 'approved' | 'rejected') => {
     setStatus(newStatus);
