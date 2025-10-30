@@ -9,7 +9,6 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 // helmet is optional; set critical headers manually to avoid runtime deps issues
 // Lightweight rate limiter (no external deps)
-const pinoHttp = require('pino-http');
 const { v4: uuidv4 } = require('uuid');
 const { z } = require('zod');
 
@@ -53,10 +52,19 @@ app.use((req, res, next) => {
   req.id = uuidv4();
   next();
 });
-app.use(pinoHttp({
-  customProps: (req) => ({ reqId: req.id }),
-  redact: ['req.headers.authorization']
-}));
+// Lightweight request logger (avoid extra deps in runtime)
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    try {
+      const ms = Date.now() - start;
+      // Basic log; redact auth header
+      const ua = req.headers['user-agent'] || '';
+      console.log(`[${req.id}] ${req.method} ${req.originalUrl} ${res.statusCode} ${ms}ms UA:${ua.substring(0,80)}`);
+    } catch {}
+  });
+  next();
+});
 // Basic param pollution guard: collapse array params to first value
 app.use((req, res, next) => {
   for (const key of Object.keys(req.query)) {
