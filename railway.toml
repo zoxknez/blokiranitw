@@ -1,0 +1,7 @@
+[build]
+command = "npm install -ws --ignore-scripts"
+
+[start]
+command = "node server/index.js"
+
+
