@@ -7,48 +7,130 @@ const path = require('path');
 const fs = require('fs');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const jwksClient = require('jwks-rsa');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+let RedisStore;
+try { RedisStore = require('rate-limit-redis').RedisStore; } catch {}
+let IORedis;
+try { IORedis = require('ioredis'); } catch {}
+const hpp = require('hpp');
+const pinoHttp = require('pino-http');
+const { v4: uuidv4 } = require('uuid');
+const { z } = require('zod');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 const HOST = process.env.HOST || '0.0.0.0';
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
 const SUPABASE_JWKS_URL = process.env.SUPABASE_JWKS_URL || 'https://kvbppgfwqnwvwubaendh.supabase.co/auth/v1/keys';
+const CAPTCHA_PROVIDER = (process.env.CAPTCHA_PROVIDER || '').toLowerCase(); // 'turnstile' | 'recaptcha'
+const CAPTCHA_SECRET = process.env.CAPTCHA_SECRET || '';
+const CAPTCHA_REQUIRED = (process.env.CAPTCHA_REQUIRED || 'false') === 'true';
 
 // Middleware
+app.disable('x-powered-by');
+app.use(helmet({
+  contentSecurityPolicy: {
+    useDefaults: true,
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", 'https://challenges.cloudflare.com', "'unsafe-inline'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", 'data:', 'https:'],
+      connectSrc: ["'self'", '*'],
+      frameSrc: ['https://challenges.cloudflare.com'],
+      objectSrc: ["'none'"],
+      baseUri: ["'self'"]
+    }
+  },
+  referrerPolicy: { policy: 'no-referrer' },
+  frameguard: { action: 'deny' },
+  dnsPrefetchControl: { allow: false },
+  crossOriginOpenerPolicy: { policy: 'same-origin' },
+  crossOriginResourcePolicy: { policy: 'same-site' }
+}));
+app.use((req, res, next) => {
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+  next();
+});
+app.use((req, res, next) => {
+  req.id = uuidv4();
+  next();
+});
+app.use(pinoHttp({
+  customProps: (req) => ({ reqId: req.id }),
+  redact: ['req.headers.authorization']
+}));
+app.use(hpp());
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || '*';
-app.use(cors({ origin: ALLOWED_ORIGIN === '*' ? true : [ALLOWED_ORIGIN], credentials: true }));
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: true }));
+app.use(cors({ origin: ALLOWED_ORIGIN === '*' ? true : [ALLOWED_ORIGIN], credentials: false }));
+app.use(bodyParser.json({ limit: '1mb' }));
+app.use(bodyParser.urlencoded({ extended: true, limit: '1mb' }));
 
-// Auth middleware: verify Supabase JWT via JWKS
-let jwksCache = null;
-async function getJWKS() {
-  if (jwksCache && (Date.now() - jwksCache.fetchedAt < 60 * 60 * 1000)) {
-    return jwksCache.keys;
-  }
-  const res = await fetch(SUPABASE_JWKS_URL);
-  const data = await res.json();
-  jwksCache = { keys: data.keys, fetchedAt: Date.now() };
-  return jwksCache.keys;
+// Redis backing (optional)
+const REDIS_URL = process.env.REDIS_URL || '';
+let redisClient = null;
+let rateStore = undefined;
+if (REDIS_URL && IORedis && RedisStore) {
+  redisClient = new IORedis(REDIS_URL, { maxRetriesPerRequest: 1, enableOfflineQueue: false });
+  rateStore = new RedisStore({ sendCommand: (...args) => redisClient.call(...args) });
 }
 
+// Alert webhook
+const LOG_WEBHOOK_URL = process.env.LOG_WEBHOOK_URL || '';
+async function sendAlert(payload) {
+  try {
+    if (!LOG_WEBHOOK_URL) return;
+    await fetch(LOG_WEBHOOK_URL, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
+  } catch {}
+}
+
+// Global rate limit (basic DoS protection)
+app.use(rateLimit({
+  windowMs: 60 * 1000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: rateStore,
+  handler: (req, res, next, options) => {
+    sendAlert({ type: 'rate-limit', path: req.path, ip: req.ip, reqId: req.id, limit: options.max });
+    return res.status(429).json({ error: 'Too many requests' });
+  }
+}));
+
+// Per-route stricter limits
+const rlCommon = { standardHeaders: true, legacyHeaders: false, store: rateStore, handler: (req, res) => res.status(429).json({ error: 'Too many requests' }) };
+const authLimiter = rateLimit({ windowMs: 5 * 60 * 1000, max: 50, ...rlCommon });
+const suggestLimiter = rateLimit({ windowMs: 60 * 1000, max: 30, ...rlCommon });
+const adminWriteLimiter = rateLimit({ windowMs: 60 * 1000, max: 20, ...rlCommon });
+
+// Trust proxy for correct IP and HTTPS detection
+app.set('trust proxy', 1);
+const FORCE_HTTPS = (process.env.FORCE_HTTPS || 'true') === 'true';
+if (FORCE_HTTPS) {
+  app.use((req, res, next) => {
+    if (req.headers['x-forwarded-proto'] && req.headers['x-forwarded-proto'] !== 'https') {
+      return res.redirect(301, 'https://' + req.headers.host + req.originalUrl);
+    }
+    next();
+  });
+}
+
+// Auth middleware: verify Supabase JWT via JWKS
+const jwks = jwksClient({
+  jwksUri: SUPABASE_JWKS_URL,
+  cache: true,
+  cacheMaxEntries: 5,
+  cacheMaxAge: 60 * 60 * 1000
+});
+
 function getKey(header, callback) {
-  getJWKS()
-    .then((keys) => {
-      const signingKey = keys.find(k => k.kid === header.kid);
-      if (!signingKey) return callback(new Error('No matching JWK'));
-      const cert = signingKey.x5c?.[0];
-      if (cert) {
-        const pem = `-----BEGIN CERTIFICATE-----\n${cert}\n-----END CERTIFICATE-----\n`;
-        callback(null, pem);
-      } else if (signingKey.n && signingKey.e) {
-        // RS256 modulus/exponent
-        callback(null, { key: signingKey });
-      } else {
-        callback(new Error('Invalid JWK'));
-      }
-    })
-    .catch((err) => callback(err));
+  jwks.getSigningKey(header.kid, (err, key) => {
+    if (err) return callback(err);
+    const signingKey = key.getPublicKey();
+    callback(null, signingKey);
+  });
 }
 
 const authenticateToken = (req, res, next) => {
@@ -63,11 +145,113 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
+// Ensure JSON content-type for JSON routes
+function ensureJson(req, res, next) {
+  if (!req.is('application/json')) {
+    return res.status(415).json({ error: 'Unsupported Media Type' });
+  }
+  next();
+}
+
+async function verifyCaptcha(token, ip) {
+  if (!CAPTCHA_REQUIRED) return true;
+  if (!CAPTCHA_SECRET) return false;
+  try {
+    if (CAPTCHA_PROVIDER === 'turnstile') {
+      const params = new URLSearchParams();
+      params.append('secret', CAPTCHA_SECRET);
+      params.append('response', token || '');
+      if (ip) params.append('remoteip', ip);
+      const r = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', { method: 'POST', body: params });
+      const data = await r.json();
+      return !!data.success;
+    }
+    if (CAPTCHA_PROVIDER === 'recaptcha') {
+      const params = new URLSearchParams();
+      params.append('secret', CAPTCHA_SECRET);
+      params.append('response', token || '');
+      if (ip) params.append('remoteip', ip);
+      const r = await fetch('https://www.google.com/recaptcha/api/siteverify', { method: 'POST', body: params });
+      const data = await r.json();
+      return !!data.success;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // Multer configuration for file uploads
-const upload = multer({ dest: 'uploads/' });
+const upload = multer({
+  dest: 'uploads/',
+  limits: { fileSize: 2 * 1024 * 1024 } // 2MB
+});
+
+// Helpers
+const MAX_LIMIT = 100;
+const SAFE_SORT_COLUMNS = new Set(['username', 'created_at', 'updated_at', 'id']);
+const SAFE_ORDER = new Set(['ASC', 'DESC']);
+function coerceLimit(value, fallback = 50) {
+  const n = parseInt(value, 10);
+  if (Number.isNaN(n) || n <= 0) return fallback;
+  return Math.min(n, MAX_LIMIT);
+}
+function coercePage(value, fallback = 1) {
+  const n = parseInt(value, 10);
+  if (Number.isNaN(n) || n <= 0) return fallback;
+  return n;
+}
+function coerceSort(value, fallback = 'username') {
+  return SAFE_SORT_COLUMNS.has(value) ? value : fallback;
+}
+function coerceOrder(value, fallback = 'ASC') {
+  const upper = String(value || '').toUpperCase();
+  return SAFE_ORDER.has(upper) ? upper : fallback;
+}
+function isAllowedProfileUrl(urlStr) {
+  try {
+    const u = new URL(urlStr);
+    return ['x.com', 'twitter.com', 'www.twitter.com', 'www.x.com'].includes(u.hostname);
+  } catch {
+    return false;
+  }
+}
+
+// Admin IP allowlist
+const ADMIN_IPS = (process.env.ADMIN_IPS || '').split(',').map(s => s.trim()).filter(Boolean);
+function requireAdminIp(req, res, next) {
+  if (ADMIN_IPS.length === 0) return next();
+  const ip = req.headers['x-forwarded-for']?.toString().split(',')[0].trim() || req.ip;
+  if (!ADMIN_IPS.includes(ip)) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  next();
+}
+
+// Zod schemas
+const SuggestionItemSchema = z.object({
+  username: z.string().min(1).max(50),
+  profile_url: z.string().url()
+});
+const SuggestionsSchema = z.object({
+  suggestions: z.array(SuggestionItemSchema).min(1).max(50),
+  captchaToken: z.string().optional()
+});
+const UserUpsertSchema = z.object({
+  username: z.string().min(1).max(50),
+  profile_url: z.string().url()
+});
 
 // Initialize SQLite database (allow custom path for Railway volume)
 const DB_PATH = process.env.DB_PATH || './blocked_users.db';
+try {
+  const dir = path.dirname(DB_PATH);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+} catch (e) {
+  console.error('Failed to prepare DB directory:', e.message);
+}
 const db = new sqlite3.Database(DB_PATH, (err) => {
   if (err) {
     console.error('Error opening database:', err.message);
@@ -79,6 +263,10 @@ const db = new sqlite3.Database(DB_PATH, (err) => {
 
 // Initialize database tables
 function initializeDatabase() {
+  // SQLite PRAGMAs for reliability
+  db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;", (e) => {
+    if (e) console.error('PRAGMA set error:', e.message);
+  });
   // Blocked users table
   db.run(`
     CREATE TABLE IF NOT EXISTS blocked_users (
@@ -92,6 +280,9 @@ function initializeDatabase() {
     if (err) {
       console.error('Error creating blocked_users table:', err.message);
     }
+    // Indices
+    db.run(`CREATE INDEX IF NOT EXISTS idx_blocked_users_username ON blocked_users(username);`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_blocked_users_created ON blocked_users(created_at);`);
   });
 
   // User suggestions table
@@ -111,6 +302,8 @@ function initializeDatabase() {
     if (err) {
       console.error('Error creating user_suggestions table:', err.message);
     }
+    db.run(`CREATE INDEX IF NOT EXISTS idx_suggestions_status_created ON user_suggestions(status, created_at);`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_suggestions_username ON user_suggestions(username);`);
   });
 
   // Admin users table
@@ -133,6 +326,27 @@ function initializeDatabase() {
       checkAndImportData();
     }
   });
+
+  // Audit logs
+  db.run(`
+    CREATE TABLE IF NOT EXISTS audit_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      action TEXT NOT NULL,
+      actor TEXT,
+      target TEXT,
+      details TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+}
+
+function writeAudit(action, actor, target, detailsObj) {
+  try {
+    const details = detailsObj ? JSON.stringify(detailsObj).slice(0, 2000) : '';
+    db.run("INSERT INTO audit_logs (action, actor, target, details) VALUES (?, ?, ?, ?)", [action, actor || '', target || '', details]);
+  } catch (e) {
+    console.error('Audit log error:', e.message);
+  }
 }
 
 // Check if data exists and import from JSON if needed
@@ -179,6 +393,14 @@ function importFromJSON() {
 }
 
 // Routes
+
+// Health check
+app.get('/api/health', (req, res) => {
+  db.get("SELECT 1 as ok", (err, row) => {
+    if (err) return res.status(500).json({ ok: false, error: 'db' });
+    res.json({ ok: true });
+  });
+});
 
 // Auth routes
 app.post('/api/auth/register', async (req, res) => {
@@ -275,7 +497,12 @@ app.post('/api/auth/login', async (req, res) => {
 
 // Get all blocked users with pagination and search
 app.get('/api/users', (req, res) => {
-  const { page = 1, limit = 50, search = '', sort = 'username', order = 'ASC', dateRange = 'all' } = req.query;
+  const page = coercePage(req.query.page || 1);
+  const limit = coerceLimit(req.query.limit || 50);
+  const search = String(req.query.search || '');
+  const sort = coerceSort(req.query.sort || 'username');
+  const order = coerceOrder(req.query.order || 'ASC');
+  const dateRange = String(req.query.dateRange || 'all');
   const offset = (page - 1) * limit;
   
   const searchTerm = `%${search}%`;
@@ -293,7 +520,7 @@ app.get('/api/users', (req, res) => {
   let query = `
     SELECT * FROM blocked_users 
     WHERE username LIKE ?${dateCondition}
-    ORDER BY ${sort} ${order.toUpperCase()}
+    ORDER BY ${sort} ${order}
     LIMIT ? OFFSET ?
   `;
   
@@ -315,8 +542,8 @@ app.get('/api/users', (req, res) => {
       res.json({
         users: rows,
         pagination: {
-          page: parseInt(page),
-          limit: parseInt(limit),
+          page: page,
+          limit: limit,
           total: countRow.total,
           pages: Math.ceil(countRow.total / limit)
         }
@@ -343,8 +570,10 @@ app.get('/api/users/:id', (req, res) => {
 });
 
 // Add new blocked user (admin only)
-app.post('/api/users', authenticateToken, (req, res) => {
-  const { username, profile_url } = req.body;
+app.post('/api/users', adminWriteLimiter, authenticateToken, requireAdminIp, ensureJson, (req, res) => {
+  const parsed = UserUpsertSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid payload' });
+  const { username, profile_url } = parsed.data;
   
   if (!username || !profile_url) {
     return res.status(400).json({ error: 'Username and profile URL are required' });
@@ -358,6 +587,7 @@ app.post('/api/users', authenticateToken, (req, res) => {
         return res.status(500).json({ error: err.message });
       }
       
+      writeAudit('users.create', req.user?.username, username);
       res.status(201).json({
         id: this.lastID,
         username,
@@ -369,9 +599,11 @@ app.post('/api/users', authenticateToken, (req, res) => {
 });
 
 // Update blocked user (admin only)
-app.put('/api/users/:id', authenticateToken, (req, res) => {
+app.put('/api/users/:id', adminWriteLimiter, authenticateToken, requireAdminIp, ensureJson, (req, res) => {
   const { id } = req.params;
-  const { username, profile_url } = req.body;
+  const parsed = UserUpsertSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid payload' });
+  const { username, profile_url } = parsed.data;
   
   if (!username || !profile_url) {
     return res.status(400).json({ error: 'Username and profile URL are required' });
@@ -389,6 +621,7 @@ app.put('/api/users/:id', authenticateToken, (req, res) => {
         return res.status(404).json({ error: 'User not found' });
       }
       
+      writeAudit('users.update', req.user?.username, String(id), { username, profile_url });
       res.json({
         id: parseInt(id),
         username,
@@ -400,7 +633,7 @@ app.put('/api/users/:id', authenticateToken, (req, res) => {
 });
 
 // Delete blocked user (admin only)
-app.delete('/api/users/:id', authenticateToken, (req, res) => {
+app.delete('/api/users/:id', adminWriteLimiter, authenticateToken, requireAdminIp, (req, res) => {
   const { id } = req.params;
   
   db.run("DELETE FROM blocked_users WHERE id = ?", [id], function(err) {
@@ -412,25 +645,50 @@ app.delete('/api/users/:id', authenticateToken, (req, res) => {
       return res.status(404).json({ error: 'User not found' });
     }
     
+    writeAudit('users.delete', req.user?.username, String(id));
     res.json({ message: 'User deleted successfully' });
   });
 });
 
 // Bulk import from JSON file (admin only)
-app.post('/api/import', authenticateToken, upload.single('file'), (req, res) => {
+app.post('/api/import', adminWriteLimiter, authenticateToken, upload.single('file'), (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No file uploaded' });
   }
   
   try {
-    const jsonData = JSON.parse(fs.readFileSync(req.file.path, 'utf8'));
+    const content = fs.readFileSync(req.file.path, 'utf8');
+    if (content.length > 2 * 1024 * 1024) { // 2MB guard
+      fs.unlinkSync(req.file.path);
+      return res.status(413).json({ error: 'File too large' });
+    }
+    const jsonData = JSON.parse(content);
+    if (!Array.isArray(jsonData)) {
+      fs.unlinkSync(req.file.path);
+      return res.status(400).json({ error: 'JSON must be an array' });
+    }
+    if (jsonData.length > 5000) { // hard cap
+      fs.unlinkSync(req.file.path);
+      return res.status(400).json({ error: 'Too many records' });
+    }
     const stmt = db.prepare("INSERT OR REPLACE INTO blocked_users (username, profile_url) VALUES (?, ?)");
     
     let imported = 0;
     let errors = 0;
     
     jsonData.forEach((user, index) => {
-      stmt.run([user.username, user.profile_url], (err) => {
+      const username = String(user.username || '').trim().replace(/^@/, '');
+      const profileUrl = String(user.profile_url || '').trim();
+      if (!username || !profileUrl || !isAllowedProfileUrl(profileUrl)) {
+        errors++;
+        if (index === jsonData.length - 1) {
+          stmt.finalize();
+          fs.unlinkSync(req.file.path);
+          return res.json({ message: 'Import completed', imported, errors, total: jsonData.length });
+        }
+        return;
+      }
+      stmt.run([username, profileUrl], (err) => {
         if (err) {
           errors++;
         } else {
@@ -440,6 +698,7 @@ app.post('/api/import', authenticateToken, upload.single('file'), (req, res) => 
         if (index === jsonData.length - 1) {
           stmt.finalize();
           fs.unlinkSync(req.file.path); // Clean up uploaded file
+          writeAudit('users.import', req.user?.username, '', { imported, errors, total: jsonData.length });
           res.json({
             message: 'Import completed',
             imported,
@@ -470,11 +729,17 @@ app.get('/api/stats', (req, res) => {
 });
 
 // Suggestions route (auth required, batch up to 50)
-app.post('/api/suggestions', authenticateToken, (req, res) => {
-  const { suggestions } = req.body;
+app.post('/api/suggestions', suggestLimiter, authenticateToken, ensureJson, async (req, res) => {
+  const parse = SuggestionsSchema.safeParse(req.body);
+  if (!parse.success) return res.status(400).json({ error: 'Invalid payload' });
+  const { suggestions, captchaToken } = parse.data;
+  if (CAPTCHA_REQUIRED) {
+    const ok = await verifyCaptcha(captchaToken, req.ip);
+    if (!ok) return res.status(400).json({ error: 'Captcha verification failed' });
+  }
 
   // Support single object fallback
-  let items = Array.isArray(suggestions) ? suggestions : (req.body.username && req.body.profile_url ? [{ username: req.body.username, profile_url: req.body.profile_url }] : []);
+  let items = Array.isArray(suggestions) ? suggestions : [];
 
   if (!items || items.length === 0) {
     return res.status(400).json({ error: 'Provide suggestions array or username and profile_url' });
@@ -490,7 +755,7 @@ app.post('/api/suggestions', authenticateToken, (req, res) => {
       username: (it.username || '').trim().replace(/^@/, ''),
       profile_url: (it.profile_url || '').trim()
     }))
-    .filter((it) => it.username && it.profile_url);
+    .filter((it) => it.username && it.profile_url && isAllowedProfileUrl(it.profile_url));
 
   if (normalized.length === 0) {
     return res.status(400).json({ error: 'No valid items found' });
@@ -512,6 +777,7 @@ app.post('/api/suggestions', authenticateToken, (req, res) => {
       completed++;
       if (completed === normalized.length) {
         stmt.finalize();
+        writeAudit('suggestions.create', suggestedBy, String(inserted), { errors, total: normalized.length });
         return res.status(201).json({
           message: 'Suggestions submitted. They will be reviewed by an administrator.',
           inserted,
@@ -563,7 +829,7 @@ app.get('/api/admin/suggestions', authenticateToken, (req, res) => {
   });
 });
 
-app.put('/api/admin/suggestions/:id/approve', authenticateToken, (req, res) => {
+app.put('/api/admin/suggestions/:id/approve', adminWriteLimiter, authenticateToken, (req, res) => {
   const { id } = req.params;
   const { username } = req.user;
   
@@ -599,6 +865,7 @@ app.put('/api/admin/suggestions/:id/approve', authenticateToken, (req, res) => {
               return res.status(500).json({ error: err.message });
             }
             
+            writeAudit('suggestions.approve', username, String(id), { addedToBlocked: this.changes > 0 });
             res.json({
               message: 'Suggestion approved and user added to blocked list',
               addedToBlocked: this.changes > 0
@@ -610,7 +877,7 @@ app.put('/api/admin/suggestions/:id/approve', authenticateToken, (req, res) => {
   });
 });
 
-app.put('/api/admin/suggestions/:id/reject', authenticateToken, (req, res) => {
+app.put('/api/admin/suggestions/:id/reject', adminWriteLimiter, authenticateToken, (req, res) => {
   const { id } = req.params;
   const { username } = req.user;
   
@@ -626,6 +893,7 @@ app.put('/api/admin/suggestions/:id/reject', authenticateToken, (req, res) => {
         return res.status(404).json({ error: 'Suggestion not found' });
       }
       
+      writeAudit('suggestions.reject', username, String(id));
       res.json({ message: 'Suggestion rejected' });
     }
   );
