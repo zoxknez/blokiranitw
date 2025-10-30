@@ -21,6 +21,9 @@ const CAPTCHA_PROVIDER = (process.env.CAPTCHA_PROVIDER || '').toLowerCase(); // 
 const CAPTCHA_SECRET = process.env.CAPTCHA_SECRET || '';
 const CAPTCHA_REQUIRED = (process.env.CAPTCHA_REQUIRED || 'false') === 'true';
 
+// Early boot log
+try { console.log(`Booting API process. HOST=${HOST} PORT=${PORT}`); } catch {}
+
 // Middleware
 app.disable('x-powered-by');
 app.use((req, res, next) => {
