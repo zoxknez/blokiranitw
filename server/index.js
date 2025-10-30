@@ -8,11 +8,7 @@ const fs = require('fs');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 // helmet is optional; set critical headers manually to avoid runtime deps issues
-const rateLimit = require('express-rate-limit');
-let RedisStore;
-try { RedisStore = require('rate-limit-redis').RedisStore; } catch {}
-let IORedis;
-try { IORedis = require('ioredis'); } catch {}
+// Lightweight rate limiter (no external deps)
 const hpp = require('hpp');
 const pinoHttp = require('pino-http');
 const { v4: uuidv4 } = require('uuid');
@@ -68,15 +64,6 @@ app.use(cors({ origin: ALLOWED_ORIGIN === '*' ? true : [ALLOWED_ORIGIN], credent
 app.use(bodyParser.json({ limit: '1mb' }));
 app.use(bodyParser.urlencoded({ extended: true, limit: '1mb' }));
 
-// Redis backing (optional)
-const REDIS_URL = process.env.REDIS_URL || '';
-let redisClient = null;
-let rateStore = undefined;
-if (REDIS_URL && IORedis && RedisStore) {
-  redisClient = new IORedis(REDIS_URL, { maxRetriesPerRequest: 1, enableOfflineQueue: false });
-  rateStore = new RedisStore({ sendCommand: (...args) => redisClient.call(...args) });
-}
-
 // Alert webhook
 const LOG_WEBHOOK_URL = process.env.LOG_WEBHOOK_URL || '';
 async function sendAlert(payload) {
@@ -86,24 +73,31 @@ async function sendAlert(payload) {
   } catch {}
 }
 
+// Simple in-memory rate limiter (per-process)
+function createRateLimiter(windowMs, max) {
+  const hits = new Map(); // key -> [timestamps]
+  return function rateLimiter(req, res, next) {
+    const now = Date.now();
+    const key = `${req.ip}:${req.path}`;
+    const arr = hits.get(key) || [];
+    const fresh = arr.filter(ts => now - ts < windowMs);
+    fresh.push(now);
+    hits.set(key, fresh);
+    if (fresh.length > max) {
+      sendAlert({ type: 'rate-limit', path: req.path, ip: req.ip, reqId: req.id, limit: max });
+      return res.status(429).json({ error: 'Too many requests' });
+    }
+    next();
+  };
+}
+
 // Global rate limit (basic DoS protection)
-app.use(rateLimit({
-  windowMs: 60 * 1000,
-  max: 300,
-  standardHeaders: true,
-  legacyHeaders: false,
-  store: rateStore,
-  handler: (req, res, next, options) => {
-    sendAlert({ type: 'rate-limit', path: req.path, ip: req.ip, reqId: req.id, limit: options.max });
-    return res.status(429).json({ error: 'Too many requests' });
-  }
-}));
+app.use(createRateLimiter(60 * 1000, 300));
 
 // Per-route stricter limits
-const rlCommon = { standardHeaders: true, legacyHeaders: false, store: rateStore, handler: (req, res) => res.status(429).json({ error: 'Too many requests' }) };
-const authLimiter = rateLimit({ windowMs: 5 * 60 * 1000, max: 50, ...rlCommon });
-const suggestLimiter = rateLimit({ windowMs: 60 * 1000, max: 30, ...rlCommon });
-const adminWriteLimiter = rateLimit({ windowMs: 60 * 1000, max: 20, ...rlCommon });
+const authLimiter = createRateLimiter(5 * 60 * 1000, 50);
+const suggestLimiter = createRateLimiter(60 * 1000, 30);
+const adminWriteLimiter = createRateLimiter(60 * 1000, 20);
 
 // Trust proxy for correct IP and HTTPS detection
 app.set('trust proxy', 1);
