@@ -7,7 +7,6 @@ const path = require('path');
 const fs = require('fs');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const jwksClient = require('jwks-rsa');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 let RedisStore;
@@ -118,19 +117,31 @@ if (FORCE_HTTPS) {
 }
 
 // Auth middleware: verify Supabase JWT via JWKS
-const jwks = jwksClient({
-  jwksUri: SUPABASE_JWKS_URL,
-  cache: true,
-  cacheMaxEntries: 5,
-  cacheMaxAge: 60 * 60 * 1000
-});
+let jwksCache = null;
+async function getJWKS() {
+  if (jwksCache && (Date.now() - jwksCache.fetchedAt < 60 * 60 * 1000)) {
+    return jwksCache.keys;
+  }
+  const res = await fetch(SUPABASE_JWKS_URL);
+  const data = await res.json();
+  jwksCache = { keys: data.keys, fetchedAt: Date.now() };
+  return jwksCache.keys;
+}
 
 function getKey(header, callback) {
-  jwks.getSigningKey(header.kid, (err, key) => {
-    if (err) return callback(err);
-    const signingKey = key.getPublicKey();
-    callback(null, signingKey);
-  });
+  getJWKS()
+    .then((keys) => {
+      const signingKey = keys.find(k => k.kid === header.kid);
+      if (!signingKey) return callback(new Error('No matching JWK'));
+      const cert = signingKey.x5c?.[0];
+      if (cert) {
+        const pem = `-----BEGIN CERTIFICATE-----\n${cert}\n-----END CERTIFICATE-----\n`;
+        callback(null, pem);
+      } else {
+        callback(new Error('Invalid JWK'));
+      }
+    })
+    .catch((err) => callback(err));
 }
 
 const authenticateToken = (req, res, next) => {
