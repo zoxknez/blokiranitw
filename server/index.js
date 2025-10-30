@@ -9,7 +9,6 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 // helmet is optional; set critical headers manually to avoid runtime deps issues
 // Lightweight rate limiter (no external deps)
-const hpp = require('hpp');
 const pinoHttp = require('pino-http');
 const { v4: uuidv4 } = require('uuid');
 const { z } = require('zod');
@@ -58,7 +57,16 @@ app.use(pinoHttp({
   customProps: (req) => ({ reqId: req.id }),
   redact: ['req.headers.authorization']
 }));
-app.use(hpp());
+// Basic param pollution guard: collapse array params to first value
+app.use((req, res, next) => {
+  for (const key of Object.keys(req.query)) {
+    const val = req.query[key];
+    if (Array.isArray(val)) {
+      req.query[key] = val[0];
+    }
+  }
+  next();
+});
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || '*';
 app.use(cors({ origin: ALLOWED_ORIGIN === '*' ? true : [ALLOWED_ORIGIN], credentials: false }));
 app.use(bodyParser.json({ limit: '1mb' }));
