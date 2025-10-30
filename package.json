@@ -3,6 +3,10 @@
   "version": "1.0.0",
   "description": "Modern web app for searching blocked Twitter users",
   "main": "server/index.js",
+  "workspaces": [
+    "server",
+    "client"
+  ],
   "scripts": {
     "start": "node server/index.js",
     "dev": "concurrently \"npm run server\" \"npm run client\"",
