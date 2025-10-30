@@ -1,19 +1,17 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { 
-  Search, 
   Plus, 
   Upload, 
   Moon, 
   Sun, 
   Users, 
-  Settings,
   RefreshCw,
   LogOut,
   Shield,
   MessageSquare
 } from 'lucide-react';
 import { BlockedUser, SearchParams, Stats, User } from './types';
-import { userService, authService, suggestionService } from './services/api';
+import { userService, authService } from './services/api';
 import SearchBar from './components/SearchBar';
 import UserCard from './components/UserCard';
 import Pagination from './components/Pagination';
@@ -59,7 +57,7 @@ const App: React.FC = () => {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
 
   // Load users
-  const loadUsers = useCallback(async (params = searchParams) => {
+  const loadUsers = useCallback(async (params: SearchParams) => {
     setIsLoading(true);
     try {
       const response = await userService.getUsers(params);

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { X, FileText, Send } from 'lucide-react';
+import { X, Send } from 'lucide-react';
 import { suggestionService } from '../services/api';
+import Captcha from './Captcha';
 
 interface SuggestionModalProps {
   isOpen: boolean;
@@ -16,6 +17,7 @@ const SuggestionModal: React.FC<SuggestionModalProps> = ({
   const [bulkText, setBulkText] = useState('');
   const [errors, setErrors] = useState<{ [key: string]: string }>({});
   const [isLoading, setIsLoading] = useState(false);
+  const [captchaToken, setCaptchaToken] = useState<string | null>(null);
 
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setBulkText(e.target.value);
@@ -51,7 +53,7 @@ const SuggestionModal: React.FC<SuggestionModalProps> = ({
 
     setIsLoading(true);
     try {
-      await suggestionService.submitSuggestions(items);
+      await suggestionService.submitSuggestions(items, captchaToken || undefined);
       
       onSuccess();
       onClose();
@@ -141,6 +143,11 @@ const SuggestionModal: React.FC<SuggestionModalProps> = ({
                 )}
                 <div className="text-xs text-gray-500 dark:text-gray-400">
                   Maksimalno 50 unosa po slanju.
+                </div>
+
+                {/* CAPTCHA */}
+                <div className="pt-2">
+                  <Captcha onToken={setCaptchaToken} />
                 </div>
               </div>
             </div>

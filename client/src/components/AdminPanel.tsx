@@ -8,7 +8,7 @@ import {
   MessageSquare,
   RefreshCw
 } from 'lucide-react';
-import { UserSuggestion, SuggestionsResponse } from '../types';
+import { UserSuggestion } from '../types';
 import { suggestionService } from '../services/api';
 import LoadingSpinner from './LoadingSpinner';
 
@@ -43,6 +43,7 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ isOpen, onClose }) => {
 
   useEffect(() => {
     if (isOpen) {
+      // eslint-disable-next-line react-hooks/exhaustive-deps
       loadSuggestions();
     }
   }, [isOpen]);

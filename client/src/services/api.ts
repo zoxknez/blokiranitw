@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { createClient } from '@supabase/supabase-js';
-import { BlockedUser, UsersResponse, Stats, SearchParams, AuthResponse, UserSuggestion, SuggestionsResponse, User } from '../types';
+import { BlockedUser, UsersResponse, Stats, SearchParams, AuthResponse, SuggestionsResponse, User } from '../types';
 
 const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000/api';
 
@@ -85,8 +85,8 @@ export const authService = {
 // Suggestion service
 export const suggestionService = {
   // Submit multiple suggestions (auth required)
-  submitSuggestions: async (items: { username: string; profile_url: string }[]): Promise<{ inserted: number; errors: number; total: number }> => {
-    const response = await api.post('/suggestions', { suggestions: items }, {
+  submitSuggestions: async (items: { username: string; profile_url: string }[], captchaToken?: string): Promise<{ inserted: number; errors: number; total: number }> => {
+    const response = await api.post('/suggestions', { suggestions: items, captchaToken }, {
       headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
     });
     return response.data;
