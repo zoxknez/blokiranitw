@@ -134,13 +134,19 @@ if (FORCE_HTTPS) {
 // Auth middleware: verify Supabase JWT via JWKS
 let jwksCache = null;
 async function getJWKS() {
-  if (jwksCache && (Date.now() - jwksCache.fetchedAt < 60 * 60 * 1000)) {
+  try {
+    if (jwksCache && (Date.now() - jwksCache.fetchedAt < 60 * 60 * 1000)) {
+      return jwksCache.keys;
+    }
+    const res = await fetch(SUPABASE_JWKS_URL);
+    if (!res.ok) throw new Error(`JWKS fetch failed: ${res.status}`);
+    const data = await res.json();
+    jwksCache = { keys: Array.isArray(data.keys) ? data.keys : [], fetchedAt: Date.now() };
     return jwksCache.keys;
+  } catch (e) {
+    try { console.error('JWKS Error:', e?.message || e); } catch {}
+    return [];
   }
-  const res = await fetch(SUPABASE_JWKS_URL);
-  const data = await res.json();
-  jwksCache = { keys: data.keys, fetchedAt: Date.now() };
-  return jwksCache.keys;
 }
 
 function getKey(header, callback) {
@@ -269,7 +275,7 @@ const UserUpsertSchema = z.object({
 });
 
 // Initialize SQLite database (allow custom path for Railway volume)
-const DB_PATH = process.env.DB_PATH || './blocked_users.db';
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'blocked_users.db');
 try {
   const dir = path.dirname(DB_PATH);
   if (!fs.existsSync(dir)) {
@@ -395,7 +401,12 @@ function checkAndImportData() {
 // Import data from JSON file
 function importFromJSON() {
   try {
-    const jsonData = JSON.parse(fs.readFileSync('../blocked_users.json', 'utf8'));
+    const jsonPath = path.join(__dirname, 'blocked_users.json');
+    if (!fs.existsSync(jsonPath)) {
+      console.warn('blocked_users.json not found in server directory; skipping initial import');
+      return;
+    }
+    const jsonData = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
     const stmt = db.prepare("INSERT OR IGNORE INTO blocked_users (username, profile_url) VALUES (?, ?)");
     
     let imported = 0;
