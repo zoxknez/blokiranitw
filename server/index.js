@@ -120,6 +120,7 @@ app.set('trust proxy', 1);
 const FORCE_HTTPS = (process.env.FORCE_HTTPS || 'true') === 'true';
 if (FORCE_HTTPS) {
   app.use((req, res, next) => {
+    if (req.path === '/api/health') return next();
     if (req.headers['x-forwarded-proto'] && req.headers['x-forwarded-proto'] !== 'https') {
       return res.redirect(301, 'https://' + req.headers.host + req.originalUrl);
     }
