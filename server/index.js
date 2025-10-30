@@ -9,7 +9,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 // helmet is optional; set critical headers manually to avoid runtime deps issues
 // Lightweight rate limiter (no external deps)
-const { v4: uuidv4 } = require('uuid');
+const { randomUUID } = require('crypto');
 const { z } = require('zod');
 
 const app = express();
@@ -49,7 +49,7 @@ app.use((req, res, next) => {
   next();
 });
 app.use((req, res, next) => {
-  req.id = uuidv4();
+  req.id = randomUUID();
   next();
 });
 // Lightweight request logger (avoid extra deps in runtime)
