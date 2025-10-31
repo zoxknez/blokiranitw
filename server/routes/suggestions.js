@@ -5,10 +5,17 @@ const { authenticateToken, ensureJson } = require('../middleware/auth');
 const { verifyCaptcha } = require('../services/captcha');
 const { isAllowedProfileUrl } = require('../utils/validation');
 const createAuditService = require('../services/audit');
-const db = require('../db').getDb();
+const dbModule = require('../db');
 
 const router = express.Router();
-const { writeAudit } = createAuditService(db);
+
+function getDb() {
+  return dbModule.getDb();
+}
+
+function getAuditService() {
+  return createAuditService(getDb());
+}
 
 // Rate limiter
 const { suggestLimiter } = require('../middleware/rateLimiter');
@@ -58,6 +65,7 @@ router.post('/', suggestLimiter, authenticateToken, ensureJson, async (req, res)
     return res.status(400).json({ error: 'No valid items found' });
   }
 
+  const db = getDb();
   const stmt = db.prepare("INSERT INTO user_suggestions (username, profile_url, reason, suggested_by) VALUES (?, ?, ?, ?)");
   let inserted = 0;
   let errors = 0;
@@ -74,7 +82,7 @@ router.post('/', suggestLimiter, authenticateToken, ensureJson, async (req, res)
       completed++;
       if (completed === normalized.length) {
         stmt.finalize();
-        writeAudit('suggestions.create', suggestedBy, String(inserted), { errors, total: normalized.length });
+        getAuditService().writeAudit('suggestions.create', suggestedBy, String(inserted), { errors, total: normalized.length });
         return res.status(201).json({
           message: 'Suggestions submitted. They will be reviewed by an administrator.',
           inserted,

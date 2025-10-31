@@ -3,10 +3,17 @@ const express = require('express');
 const { authenticateToken } = require('../middleware/auth');
 const { requireAdmin } = require('../middleware/admin');
 const createAuditService = require('../services/audit');
-const db = require('../db').getDb();
+const dbModule = require('../db');
 
 const router = express.Router();
-const { writeAudit } = createAuditService(db);
+
+function getDb() {
+  return dbModule.getDb();
+}
+
+function getAuditService() {
+  return createAuditService(getDb());
+}
 
 // Rate limiters
 const { adminWriteLimiter } = require('../middleware/rateLimiter');
@@ -20,6 +27,7 @@ router.get('/audit', authenticateToken, requireAdmin, (req, res) => {
   const query = `SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT ? OFFSET ?`;
   const countQuery = `SELECT COUNT(*) as total FROM audit_logs`;
 
+  const db = getDb();
   db.get(countQuery, [], (err, countRow) => {
     if (err) {
       return res.status(500).json({ error: err.message });
@@ -69,6 +77,7 @@ router.get('/suggestions', authenticateToken, requireAdmin, (req, res) => {
     WHERE status = ?
   `;
   
+  const db = getDb();
   db.get(countQuery, [status], (err, countRow) => {
     if (err) {
       return res.status(500).json({ error: err.message });
@@ -98,6 +107,7 @@ router.put('/suggestions/:id/approve', adminWriteLimiter, authenticateToken, req
   const { username } = req.user;
   
   // First get the suggestion
+  const db = getDb();
   db.get("SELECT * FROM user_suggestions WHERE id = ?", [id], (err, sug) => {
     if (err) {
       return res.status(500).json({ error: err.message });
@@ -134,7 +144,7 @@ router.put('/suggestions/:id/approve', adminWriteLimiter, authenticateToken, req
               return res.status(500).json({ error: updateErr.message });
             }
             
-            writeAudit('suggestions.approve', username, String(id), { addedToBlocked });
+            getAuditService().writeAudit('suggestions.approve', username, String(id), { addedToBlocked });
             res.json({
               message: 'Suggestion approved',
               addedToBlocked
@@ -151,6 +161,7 @@ router.put('/suggestions/:id/reject', adminWriteLimiter, authenticateToken, requ
   const { id } = req.params;
   const { username } = req.user;
   
+  const db = getDb();
   db.run(
     "UPDATE user_suggestions SET status = 'rejected', reviewed_at = CURRENT_TIMESTAMP, reviewed_by = ? WHERE id = ?",
     [username, id],
@@ -163,7 +174,7 @@ router.put('/suggestions/:id/reject', adminWriteLimiter, authenticateToken, requ
         return res.status(404).json({ error: 'Suggestion not found' });
       }
       
-      writeAudit('suggestions.reject', username, String(id), {});
+      getAuditService().writeAudit('suggestions.reject', username, String(id), {});
       res.json({ message: 'Suggestion rejected' });
     }
   );

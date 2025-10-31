@@ -9,10 +9,20 @@ const { requireAdmin, requireAdminIp: requireAdminIpMiddleware } = require('../m
 const { coerceLimit, coercePage, coerceSort, coerceOrder, buildDateCondition } = require('../utils/query');
 const { isAllowedProfileUrl } = require('../utils/validation');
 const createAuditService = require('../services/audit');
-const db = require('../db').getDb();
+const dbModule = require('../db');
+
+// Get db lazily (will throw if not initialized, routes handle it)
+function getDb() {
+  return dbModule.getDb();
+}
 
 const router = express.Router();
-const { writeAudit } = createAuditService(db);
+
+// Helper to get audit service
+function getAuditService() {
+  const db = getDb();
+  return createAuditService(db);
+}
 
 const UserUpsertSchema = z.object({
   username: z.string().min(1).max(50),
@@ -38,6 +48,7 @@ const { requireAdminIp } = require('../middleware/admin');
 
 // Get all blocked users with pagination and search
 router.get('/', (req, res) => {
+  const db = getDb();
   const page = coercePage(req.query.page || 1);
   const limit = coerceLimit(req.query.limit || 50);
   const search = String(req.query.search || '');
@@ -137,7 +148,7 @@ router.post('/', adminWriteLimiter, authenticateToken, requireAdmin, ensureJson,
         return res.status(500).json({ error: err.message });
       }
       
-      writeAudit('users.create', req.user?.username || 'system', username, { id: this.lastID });
+      getAuditService().writeAudit('users.create', req.user?.username || 'system', username, { id: this.lastID });
       res.status(201).json({ id: this.lastID, username, profile_url });
     }
   );
@@ -166,7 +177,7 @@ router.put('/:id', adminWriteLimiter, authenticateToken, requireAdmin, ensureJso
         return res.status(404).json({ error: 'User not found' });
       }
       
-      writeAudit('users.update', req.user?.username || 'system', username, { id });
+      getAuditService().writeAudit('users.update', req.user?.username || 'system', username, { id });
       res.json({ id, username, profile_url });
     }
   );
@@ -190,7 +201,7 @@ router.delete('/:id', adminWriteLimiter, authenticateToken, requireAdmin, (req, 
         return res.status(500).json({ error: err.message });
       }
       
-      writeAudit('users.delete', req.user?.username || 'system', row.username, { id });
+      getAuditService().writeAudit('users.delete', req.user?.username || 'system', row.username, { id });
       res.json({ message: 'User deleted successfully' });
     });
   });
@@ -222,7 +233,7 @@ router.post('/import', adminWriteLimiter, authenticateToken, requireAdmin, requi
         errors++;
         if (index === jsonData.length - 1) {
           stmt.finalize();
-          writeAudit('users.import', req.user?.username || 'system', '', { imported, errors, total: jsonData.length });
+          getAuditService().writeAudit('users.import', req.user?.username || 'system', '', { imported, errors, total: jsonData.length });
           return res.status(201).json({ 
             message: 'Import completed', 
             imported, 
@@ -242,7 +253,7 @@ router.post('/import', adminWriteLimiter, authenticateToken, requireAdmin, requi
         
         if (index === jsonData.length - 1) {
           stmt.finalize();
-          writeAudit('users.import', req.user?.username || 'system', '', { imported, errors, total: jsonData.length });
+          getAuditService().writeAudit('users.import', req.user?.username || 'system', '', { imported, errors, total: jsonData.length });
           return res.status(201).json({ 
             message: 'Import completed', 
             imported, 

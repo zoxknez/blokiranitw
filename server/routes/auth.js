@@ -4,9 +4,13 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { createClient } = require('@supabase/supabase-js');
 const config = require('../config');
-const db = require('../db').getDb();
+const dbModule = require('../db');
 
 const router = express.Router();
+
+function getDb() {
+  return dbModule.getDb();
+}
 
 // Supabase client za sync
 const SUPABASE_URL = process.env.SUPABASE_URL || process.env.REACT_APP_SUPABASE_URL || 'https://kvbppgfwqnwvwubaendh.supabase.co';
@@ -16,6 +20,7 @@ const supabaseClient = (SUPABASE_URL && SUPABASE_ANON_KEY) ? createClient(SUPABA
 
 // Helper: Ensure users table exists
 function ensureUsersTable(req, callback) {
+  const db = getDb();
   db.serialize(() => {
     db.run(`CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,6 +67,7 @@ router.post('/api/auth/register', async (req, res) => {
     }
 
     // Check if user already exists
+    const db = getDb();
     db.get("SELECT * FROM users WHERE username = ? OR email = ?", [username, email], async (err, row) => {
       if (err) {
         return res.status(500).json({ error: err.message });
@@ -149,6 +155,7 @@ router.post('/api/auth/login', async (req, res) => {
     }
 
     // First check in users table (regular users)
+    const db = getDb();
     db.get("SELECT *, 'user' as role FROM users WHERE username = ?", [username], async (err, row) => {
       let isAdmin = false;
       let userRole = 'user';

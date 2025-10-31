@@ -1,6 +1,5 @@
 const express = require('express');
 const cors = require('cors');
-const sqlite3 = require('sqlite3').verbose();
 const multer = require('multer');
 const bodyParser = require('body-parser');
 const path = require('path');
@@ -8,10 +7,9 @@ const fs = require('fs');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { createClient } = require('@supabase/supabase-js');
-// helmet is optional; set critical headers manually to avoid runtime deps issues
-// Lightweight rate limiter (no external deps)
 const { randomUUID } = require('crypto');
 const { z } = require('zod');
+const dbModule = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
@@ -369,10 +367,12 @@ const authenticateToken = async (req, res, next) => {
       }
 
       // Fallback: Proveri role iz lokalne SQLite baze (za backward compatibility)
-      db.get(
-        "SELECT id, username, email, role FROM admin_users WHERE email = ? OR username = ?",
-        [email, username],
-        (err, row) => {
+      try {
+        const localDb = dbModule.getDb();
+        localDb.get(
+          "SELECT id, username, email, role FROM admin_users WHERE email = ? OR username = ?",
+          [email, username],
+          (err, row) => {
           if (err) {
             console.error(`[${req.id}] Database error checking user role:`, err.message);
             return res.status(403).json({ error: 'User not found in database' });
@@ -392,6 +392,10 @@ const authenticateToken = async (req, res, next) => {
           return next();
         }
       );
+      } catch (dbErr) {
+        console.error(`[${req.id}] Database not available:`, dbErr.message);
+        return res.status(503).json({ error: 'Database unavailable' });
+      }
       return; // Vrati iz funkcije, callback će pozvati next() ili res.status()
     } else if (decodedHeader.alg === 'HS256') {
       payload = await verifyLocalJwt(token);
@@ -525,205 +529,16 @@ const UserUpsertSchema = z.object({
   profile_url: z.string().url().refine(isAllowedProfileUrl, 'Only Twitter/X profile URLs are allowed')
 });
 
-// Initialize SQLite database (allow custom path for Railway volume)
-const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'blocked_users.db');
-try {
-  const dir = path.dirname(DB_PATH);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
-} catch (e) {
-  console.error('Failed to prepare DB directory:', e.message);
-}
-const db = new sqlite3.Database(DB_PATH, (err) => {
-  if (err) {
-    console.error('Error opening database:', err.message);
-    console.error('Database path:', DB_PATH);
+// Initialize database connection
+let db;
+async function initializeDatabase() {
+  try {
+    db = await dbModule.connect();
+    console.log('Database initialized and ready');
+  } catch (err) {
+    console.error('Failed to initialize database:', err.message);
     // Don't exit - allow server to start even if DB has issues
     // The healthcheck endpoint doesn't depend on DB
-  } else {
-    console.log('Connected to SQLite database at', DB_PATH);
-    initializeDatabase();
-  }
-});
-
-// Set database timeout to prevent hanging (30 seconds)
-try {
-  db.configure('busyTimeout', 30000);
-} catch (e) {
-  console.warn('Could not configure database timeout:', e.message);
-}
-
-// Initialize database tables
-function initializeDatabase() {
-  // SQLite PRAGMAs for reliability
-  db.exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;", (e) => {
-    if (e) console.error('PRAGMA set error:', e.message);
-  });
-  // Blocked users table
-  db.run(`
-    CREATE TABLE IF NOT EXISTS blocked_users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      username TEXT UNIQUE NOT NULL,
-      profile_url TEXT NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-  `, (err) => {
-    if (err) {
-      console.error('Error creating blocked_users table:', err.message);
-    }
-    // Indices
-    db.run(`CREATE INDEX IF NOT EXISTS idx_blocked_users_username ON blocked_users(username);`);
-    db.run(`CREATE INDEX IF NOT EXISTS idx_blocked_users_created ON blocked_users(created_at);`);
-  });
-
-  // User suggestions table
-  db.run(`
-    CREATE TABLE IF NOT EXISTS user_suggestions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      username TEXT NOT NULL,
-      profile_url TEXT NOT NULL,
-      reason TEXT,
-      suggested_by TEXT,
-      status TEXT DEFAULT 'pending',
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      reviewed_at DATETIME,
-      reviewed_by TEXT
-    )
-  `, (err) => {
-    if (err) {
-      console.error('Error creating user_suggestions table:', err.message);
-    }
-    db.run(`CREATE INDEX IF NOT EXISTS idx_suggestions_status_created ON user_suggestions(status, created_at);`);
-    db.run(`CREATE INDEX IF NOT EXISTS idx_suggestions_username ON user_suggestions(username);`);
-  });
-
-  // Users table (obični korisnici - BEZ role kolone)
-  db.run(`
-    CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      username TEXT UNIQUE NOT NULL,
-      email TEXT UNIQUE NOT NULL,
-      password_hash TEXT NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      last_login DATETIME
-    )
-  `, (err) => {
-    if (err) {
-      console.error('Error creating users table:', err.message);
-    } else {
-      console.log('✓ users table ready');
-      db.run(`CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);`);
-      db.run(`CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);`);
-    }
-  });
-
-  // Admin users table (SAMO admini - SA role kolonom)
-  db.run(`
-    CREATE TABLE IF NOT EXISTS admin_users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      username TEXT UNIQUE NOT NULL,
-      email TEXT UNIQUE NOT NULL,
-      password_hash TEXT NOT NULL,
-      role TEXT DEFAULT 'admin',
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      last_login DATETIME
-    )
-  `, (err) => {
-    if (err) {
-      console.error('Error creating admin_users table:', err.message);
-    } else {
-      console.log('✓ admin_users table ready');
-      // Check if there are any admin users
-      db.get("SELECT COUNT(*) as count FROM admin_users", (err, row) => {
-        if (err) {
-          console.error('Error checking admin users:', err.message);
-        } else {
-          console.log(`Current admin users in database: ${row.count}`);
-          if (row.count === 0) {
-            console.warn('⚠ WARNING: No admin users found in database!');
-            console.warn('⚠ To create admin users, run the SQL script from supabase/create-admins.sql');
-            console.warn('⚠ Or use the admin setup scripts in server/scripts (requires DB access)');
-          }
-          if (row.count > 5) {
-            console.warn('⚠ WARNING: Large number of admin users detected. Verify this is expected.');
-            console.warn('⚠ If you suspect accidental public admin creation, run server/scripts/demote-admins.js to demote non-whitelisted users.');
-          }
-        }
-      });
-      // Import existing JSON data if table is empty
-      checkAndImportData();
-    }
-  });
-
-  // Audit logs
-  db.run(`
-    CREATE TABLE IF NOT EXISTS audit_logs (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      action TEXT NOT NULL,
-      actor TEXT,
-      target TEXT,
-      details TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
-}
-
-function writeAudit(action, actor, target, detailsObj) {
-  try {
-    const details = detailsObj ? JSON.stringify(detailsObj).slice(0, 2000) : '';
-    db.run("INSERT INTO audit_logs (action, actor, target, details) VALUES (?, ?, ?, ?)", [action, actor || '', target || '', details]);
-  } catch (e) {
-    console.error('Audit log error:', e.message);
-  }
-}
-
-// Check if data exists and import from JSON if needed
-function checkAndImportData() {
-  db.get("SELECT COUNT(*) as count FROM blocked_users", (err, row) => {
-    if (err) {
-      console.error('Error checking data:', err.message);
-      return;
-    }
-    
-    if (row.count === 0) {
-      console.log('No data found, importing from JSON...');
-      importFromJSON();
-    } else {
-      console.log(`Database contains ${row.count} blocked users`);
-    }
-  });
-}
-
-// Import data from JSON file
-function importFromJSON() {
-  try {
-    const jsonPath = path.join(__dirname, 'blocked_users.json');
-    if (!fs.existsSync(jsonPath)) {
-      console.warn('blocked_users.json not found in server directory; skipping initial import');
-      return;
-    }
-    const jsonData = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
-    const stmt = db.prepare("INSERT OR IGNORE INTO blocked_users (username, profile_url) VALUES (?, ?)");
-    
-    let imported = 0;
-    jsonData.forEach((user, index) => {
-      stmt.run([user.username, user.profile_url], (err) => {
-        if (err) {
-          console.error(`Error inserting user ${user.username}:`, err.message);
-        } else {
-          imported++;
-        }
-        
-        if (index === jsonData.length - 1) {
-          stmt.finalize();
-          console.log(`Successfully imported ${imported} users`);
-        }
-      });
-    });
-  } catch (error) {
-    console.error('Error reading JSON file:', error.message);
   }
 }
 
@@ -772,40 +587,69 @@ process.on('uncaughtException', (err) => {
   try { console.error('uncaughtException', err); } catch {}
 });
 
-// Start server
-const server = app.listen(PORT, HOST, () => {
-  console.log(`Server running on http://${HOST}:${PORT}`);
-  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`Health check available at: http://${HOST}:${PORT}/`);
-  console.log(`API health check available at: http://${HOST}:${PORT}/api/health`);
-});
-
-// Error handling for server startup
-server.on('error', (err) => {
-  console.error('Server error:', err);
-  if (err.code === 'EADDRINUSE') {
-    console.error(`Port ${PORT} is already in use`);
-  }
-  process.exit(1);
-});
-
-server.on('listening', () => {
-  console.log(`✓ Server successfully started and listening on port ${PORT}`);
-});
-
-// Graceful shutdown
-function shutdown() {
-  console.log('Shutting down...');
-  server.close(() => {
-    db.close((err) => {
-      if (err) {
-        console.error(err.message);
-      }
-      console.log('Database connection closed');
-      process.exit(0);
-    });
+// Initialize database and start server
+initializeDatabase().then(() => {
+  // Start server after DB is initialized
+  const server = app.listen(PORT, HOST, () => {
+    console.log(`Server running on http://${HOST}:${PORT}`);
+    console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+    console.log(`Health check available at: http://${HOST}:${PORT}/`);
+    console.log(`API health check available at: http://${HOST}:${PORT}/api/health`);
   });
-}
 
-process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown);
+  // Error handling for server startup
+  server.on('error', (err) => {
+    console.error('Server error:', err);
+    if (err.code === 'EADDRINUSE') {
+      console.error(`Port ${PORT} is already in use`);
+    }
+    process.exit(1);
+  });
+
+  server.on('listening', () => {
+    console.log(`✓ Server successfully started and listening on port ${PORT}`);
+  });
+
+  // Graceful shutdown
+  function shutdown() {
+    console.log('Shutting down...');
+    server.close(() => {
+      try {
+        const localDb = dbModule.getDb();
+        localDb.close((err) => {
+          if (err) {
+            console.error(err.message);
+          }
+          console.log('Database connection closed');
+          process.exit(0);
+        });
+      } catch (err) {
+        console.log('Database already closed or not initialized');
+        process.exit(0);
+      }
+    });
+  }
+
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+}).catch((err) => {
+  console.error('Failed to initialize database:', err);
+  // Start server anyway for healthcheck - routes will handle DB errors
+  const server = app.listen(PORT, HOST, () => {
+    console.log(`Server running on http://${HOST}:${PORT} (database unavailable)`);
+    console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+    console.warn('⚠ Database not initialized - API endpoints may fail');
+  });
+
+  server.on('error', (err) => {
+    console.error('Server error:', err);
+    if (err.code === 'EADDRINUSE') {
+      console.error(`Port ${PORT} is already in use`);
+    }
+    process.exit(1);
+  });
+
+  process.on('SIGINT', () => process.exit(0));
+  process.on('SIGTERM', () => process.exit(0));
+});
+
