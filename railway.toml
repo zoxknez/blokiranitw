@@ -1,0 +1,6 @@
+[build]
+command = "cd server && npm install --omit=dev"
+
+[start]
+command = "cd server && node index.js"
+

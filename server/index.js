@@ -34,12 +34,18 @@ app.use((req, res, next) => {
   res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
   res.setHeader('Cross-Origin-Resource-Policy', 'same-site');
   // CSP tuned for our app and Turnstile widget
+  const ALLOWED_CONNECT = (process.env.ALLOWED_CONNECT || '')
+    .split(',').map(s => s.trim()).filter(Boolean);
+  // Default to Supabase and Turnstile if not specified
+  const connectSrc = ALLOWED_CONNECT.length > 0 
+    ? ALLOWED_CONNECT.join(' ')
+    : 'https://*.supabase.co https://challenges.cloudflare.com';
   const csp = [
     "default-src 'self'",
     "script-src 'self' https://challenges.cloudflare.com 'unsafe-inline'",
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: https:",
-    "connect-src 'self' *",
+    `connect-src 'self' ${connectSrc}`,
     "frame-src https://challenges.cloudflare.com",
     "object-src 'none'",
     "base-uri 'self'"
@@ -78,8 +84,10 @@ app.use((req, res, next) => {
   }
   next();
 });
-const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || '*';
-app.use(cors({ origin: ALLOWED_ORIGIN === '*' ? true : [ALLOWED_ORIGIN], credentials: false }));
+// CORS: support multiple origins (comma-separated)
+const raw = process.env.ALLOWED_ORIGIN || '*';
+const origins = raw === '*' ? true : raw.split(',').map(s => s.trim()).filter(Boolean);
+app.use(cors({ origin: origins, credentials: false }));
 app.use(bodyParser.json({ limit: '1mb' }));
 app.use(bodyParser.urlencoded({ extended: true, limit: '1mb' }));
 
@@ -165,16 +173,48 @@ function getKey(header, callback) {
     .catch((err) => callback(err));
 }
 
-const authenticateToken = (req, res, next) => {
+// JWT verification helpers
+async function verifySupabaseJwt(token) {
+  return new Promise((resolve, reject) => {
+    jwt.verify(token, getKey, { algorithms: ['RS256'] }, (err, payload) => {
+      if (err) return reject(err);
+      resolve(payload);
+    });
+  });
+}
+
+async function verifyLocalJwt(token) {
+  return new Promise((resolve, reject) => {
+    jwt.verify(token, JWT_SECRET, { algorithms: ['HS256'] }, (err, payload) => {
+      if (err) return reject(err);
+      resolve(payload);
+    });
+  });
+}
+
+const authenticateToken = async (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
   if (!token) return res.status(401).json({ error: 'Access token required' });
 
-  jwt.verify(token, getKey, { algorithms: ['RS256'] }, (err, payload) => {
-    if (err) return res.status(403).json({ error: 'Invalid or expired token' });
-    req.user = { id: payload.sub, username: payload.user_metadata?.username || payload.email };
-    next();
-  });
+  try {
+    // Decode header to check algorithm
+    const decodedHeader = JSON.parse(Buffer.from(token.split('.')[0], 'base64url').toString('utf8'));
+    let payload;
+    
+    if (decodedHeader.alg === 'RS256') {
+      payload = await verifySupabaseJwt(token);
+      req.user = { id: payload.sub, username: payload.user_metadata?.username || payload.email };
+    } else if (decodedHeader.alg === 'HS256') {
+      payload = await verifyLocalJwt(token);
+      req.user = { id: payload.id, username: payload.username, email: payload.email, role: payload.role };
+    } else {
+      return res.status(400).json({ error: 'Unsupported JWT algorithm' });
+    }
+    return next();
+  } catch (err) {
+    return res.status(403).json({ error: 'Invalid or expired token' });
+  }
 };
 
 // Ensure JSON content-type for JSON routes
@@ -213,9 +253,17 @@ async function verifyCaptcha(token, ip) {
   }
 }
 
+// Create uploads directory on boot
+const UPLOAD_DIR = path.join(__dirname, 'uploads');
+try {
+  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+} catch (e) {
+  console.error('Failed to create uploads directory:', e.message);
+}
+
 // Multer configuration for file uploads
 const upload = multer({
-  dest: 'uploads/',
+  dest: UPLOAD_DIR,
   limits: { fileSize: 2 * 1024 * 1024 } // 2MB
 });
 
@@ -263,7 +311,7 @@ function requireAdminIp(req, res, next) {
 // Zod schemas
 const SuggestionItemSchema = z.object({
   username: z.string().min(1).max(50),
-  profile_url: z.string().url()
+  profile_url: z.string().url().refine(isAllowedProfileUrl, 'Only Twitter/X profile URLs are allowed')
 });
 const SuggestionsSchema = z.object({
   suggestions: z.array(SuggestionItemSchema).min(1).max(50),
@@ -271,7 +319,7 @@ const SuggestionsSchema = z.object({
 });
 const UserUpsertSchema = z.object({
   username: z.string().min(1).max(50),
-  profile_url: z.string().url()
+  profile_url: z.string().url().refine(isAllowedProfileUrl, 'Only Twitter/X profile URLs are allowed')
 });
 
 // Initialize SQLite database (allow custom path for Railway volume)
@@ -453,6 +501,7 @@ app.get('/', (req, res) => {
 
 // Auth routes
 app.post('/api/auth/register', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
   const { username, email, password } = req.body;
   
   if (!username || !email || !password) {
@@ -503,6 +552,7 @@ app.post('/api/auth/register', async (req, res) => {
 });
 
 app.post('/api/auth/login', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
   const { username, password } = req.body;
   
   if (!username || !password) {
@@ -639,6 +689,10 @@ app.post('/api/users', adminWriteLimiter, authenticateToken, requireAdminIp, ens
     return res.status(400).json({ error: 'Username and profile URL are required' });
   }
   
+  if (!isAllowedProfileUrl(profile_url)) {
+    return res.status(400).json({ error: 'Only Twitter/X profile URLs are allowed' });
+  }
+  
   db.run(
     "INSERT INTO blocked_users (username, profile_url) VALUES (?, ?)",
     [username, profile_url],
@@ -667,6 +721,10 @@ app.put('/api/users/:id', adminWriteLimiter, authenticateToken, requireAdminIp, 
   
   if (!username || !profile_url) {
     return res.status(400).json({ error: 'Username and profile URL are required' });
+  }
+  
+  if (!isAllowedProfileUrl(profile_url)) {
+    return res.status(400).json({ error: 'Only Twitter/X profile URLs are allowed' });
   }
   
   db.run(
@@ -711,7 +769,7 @@ app.delete('/api/users/:id', adminWriteLimiter, authenticateToken, requireAdminI
 });
 
 // Bulk import from JSON file (admin only)
-app.post('/api/import', adminWriteLimiter, authenticateToken, upload.single('file'), (req, res) => {
+app.post('/api/import', adminWriteLimiter, authenticateToken, requireAdminIp, upload.single('file'), (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No file uploaded' });
   }
@@ -731,41 +789,53 @@ app.post('/api/import', adminWriteLimiter, authenticateToken, upload.single('fil
       fs.unlinkSync(req.file.path);
       return res.status(400).json({ error: 'Too many records' });
     }
-    const stmt = db.prepare("INSERT OR REPLACE INTO blocked_users (username, profile_url) VALUES (?, ?)");
     
+    // Use UPSERT instead of REPLACE to preserve ID and timestamps
+    const stmt = db.prepare(`
+      INSERT INTO blocked_users (username, profile_url)
+      VALUES (?, ?)
+      ON CONFLICT(username) DO UPDATE SET
+        profile_url = excluded.profile_url,
+        updated_at = CURRENT_TIMESTAMP
+    `);
+    
+    let processed = 0;
     let imported = 0;
     let errors = 0;
+    const total = jsonData.length;
     
-    jsonData.forEach((user, index) => {
+    function finish() {
+      stmt.finalize(() => {
+        try { fs.unlinkSync(req.file.path); } catch {}
+        writeAudit('users.import', req.user?.username, '', { imported, errors, total });
+        res.json({
+          message: 'Import completed',
+          imported,
+          errors,
+          total
+        });
+      });
+    }
+    
+    jsonData.forEach((user) => {
       const username = String(user.username || '').trim().replace(/^@/, '');
       const profileUrl = String(user.profile_url || '').trim();
+      
       if (!username || !profileUrl || !isAllowedProfileUrl(profileUrl)) {
         errors++;
-        if (index === jsonData.length - 1) {
-          stmt.finalize();
-          fs.unlinkSync(req.file.path);
-          return res.json({ message: 'Import completed', imported, errors, total: jsonData.length });
-        }
+        processed++;
+        if (processed === total) finish();
         return;
       }
+      
       stmt.run([username, profileUrl], (err) => {
         if (err) {
           errors++;
         } else {
           imported++;
         }
-        
-        if (index === jsonData.length - 1) {
-          stmt.finalize();
-          fs.unlinkSync(req.file.path); // Clean up uploaded file
-          writeAudit('users.import', req.user?.username, '', { imported, errors, total: jsonData.length });
-          res.json({
-            message: 'Import completed',
-            imported,
-            errors,
-            total: jsonData.length
-          });
-        }
+        processed++;
+        if (processed === total) finish();
       });
     });
   } catch (error) {
@@ -860,7 +930,9 @@ app.post('/api/suggestions', suggestLimiter, authenticateToken, ensureJson, asyn
 
 // Admin routes for suggestions (require authentication)
 app.get('/api/admin/suggestions', authenticateToken, (req, res) => {
-  const { status = 'pending', page = 1, limit = 20 } = req.query;
+  const status = String(req.query.status || 'pending');
+  const page = Math.max(parseInt(req.query.page) || 1, 1);
+  const limit = Math.min(parseInt(req.query.limit) || 20, MAX_LIMIT);
   const offset = (page - 1) * limit;
   
   let query = `
@@ -898,46 +970,51 @@ app.get('/api/admin/suggestions', authenticateToken, (req, res) => {
   });
 });
 
-app.put('/api/admin/suggestions/:id/approve', adminWriteLimiter, authenticateToken, (req, res) => {
+app.put('/api/admin/suggestions/:id/approve', adminWriteLimiter, authenticateToken, requireAdminIp, (req, res) => {
   const { id } = req.params;
   const { username } = req.user;
   
   // First get the suggestion
-  db.get("SELECT * FROM user_suggestions WHERE id = ?", [id], (err, suggestion) => {
+  db.get("SELECT * FROM user_suggestions WHERE id = ?", [id], (err, sug) => {
     if (err) {
       return res.status(500).json({ error: err.message });
     }
     
-    if (!suggestion) {
+    if (!sug) {
       return res.status(404).json({ error: 'Suggestion not found' });
     }
     
-    if (suggestion.status !== 'pending') {
+    if (sug.status !== 'pending') {
       return res.status(400).json({ error: 'Suggestion already processed' });
     }
+    
+    let addedToBlocked = false;
     
     // Add to blocked users
     db.run(
       "INSERT OR IGNORE INTO blocked_users (username, profile_url) VALUES (?, ?)",
-      [suggestion.username, suggestion.profile_url],
-      function(err) {
-        if (err) {
-          return res.status(500).json({ error: err.message });
+      [sug.username, sug.profile_url],
+      function(insertErr) {
+        if (insertErr) {
+          return res.status(500).json({ error: insertErr.message });
         }
+        
+        // Check if row was actually inserted (this.changes > 0 means new row)
+        addedToBlocked = this.changes > 0;
         
         // Update suggestion status
         db.run(
           "UPDATE user_suggestions SET status = 'approved', reviewed_at = CURRENT_TIMESTAMP, reviewed_by = ? WHERE id = ?",
           [username, id],
-          function(err) {
-            if (err) {
-              return res.status(500).json({ error: err.message });
+          function(updateErr) {
+            if (updateErr) {
+              return res.status(500).json({ error: updateErr.message });
             }
             
-            writeAudit('suggestions.approve', username, String(id), { addedToBlocked: this.changes > 0 });
+            writeAudit('suggestions.approve', username, String(id), { addedToBlocked });
             res.json({
-              message: 'Suggestion approved and user added to blocked list',
-              addedToBlocked: this.changes > 0
+              message: 'Suggestion approved',
+              addedToBlocked
             });
           }
         );
@@ -946,7 +1023,7 @@ app.put('/api/admin/suggestions/:id/approve', adminWriteLimiter, authenticateTok
   });
 });
 
-app.put('/api/admin/suggestions/:id/reject', adminWriteLimiter, authenticateToken, (req, res) => {
+app.put('/api/admin/suggestions/:id/reject', adminWriteLimiter, authenticateToken, requireAdminIp, (req, res) => {
   const { id } = req.params;
   const { username } = req.user;
   
@@ -1026,12 +1103,18 @@ server.on('listening', () => {
 });
 
 // Graceful shutdown
-process.on('SIGINT', () => {
-  db.close((err) => {
-    if (err) {
-      console.error(err.message);
-    }
-    console.log('Database connection closed');
-    process.exit(0);
+function shutdown() {
+  console.log('Shutting down...');
+  server.close(() => {
+    db.close((err) => {
+      if (err) {
+        console.error(err.message);
+      }
+      console.log('Database connection closed');
+      process.exit(0);
+    });
   });
-});
+}
+
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
