@@ -4,4 +4,3 @@ command = "npm install --omit=dev"
 [start]
 command = "node index.js"
 
-

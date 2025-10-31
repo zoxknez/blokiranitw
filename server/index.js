@@ -287,6 +287,9 @@ try {
 const db = new sqlite3.Database(DB_PATH, (err) => {
   if (err) {
     console.error('Error opening database:', err.message);
+    console.error('Database path:', DB_PATH);
+    // Don't exit - allow server to start even if DB has issues
+    // The healthcheck endpoint doesn't depend on DB
   } else {
     console.log('Connected to SQLite database at', DB_PATH);
     initializeDatabase();
@@ -294,7 +297,11 @@ const db = new sqlite3.Database(DB_PATH, (err) => {
 });
 
 // Set database timeout to prevent hanging (30 seconds)
-db.configure('busyTimeout', 30000);
+try {
+  db.configure('busyTimeout', 30000);
+} catch (e) {
+  console.warn('Could not configure database timeout:', e.message);
+}
 
 // Initialize database tables
 function initializeDatabase() {
@@ -997,11 +1004,25 @@ process.on('uncaughtException', (err) => {
   try { console.error('uncaughtException', err); } catch {}
 });
 
-app.listen(PORT, HOST, () => {
+// Start server
+const server = app.listen(PORT, HOST, () => {
   console.log(`Server running on http://${HOST}:${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`Health check available at: http://${HOST}:${PORT}/`);
   console.log(`API health check available at: http://${HOST}:${PORT}/api/health`);
+});
+
+// Error handling for server startup
+server.on('error', (err) => {
+  console.error('Server error:', err);
+  if (err.code === 'EADDRINUSE') {
+    console.error(`Port ${PORT} is already in use`);
+  }
+  process.exit(1);
+});
+
+server.on('listening', () => {
+  console.log(`✓ Server successfully started and listening on port ${PORT}`);
 });
 
 // Graceful shutdown
