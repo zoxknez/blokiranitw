@@ -9,13 +9,16 @@
 
 ## Railway.toml
 
-The `railway.toml` file in the root directory contains:
+The `railway.toml` file is located in the `server/` directory and contains:
 - Build command: `npm install --omit=dev`
 - Start command: `node index.js`
 
 Since Root Directory is set to `server/`, Railway will:
-- Run build/start commands from railway.toml in the `server/` context
+- Automatically detect `railway.toml` in the root directory (`server/`)
+- Run build/start commands from railway.toml
 - The start command `node index.js` will execute `server/index.js`
+
+**IMPORTANT**: You must **DELETE** or **CLEAR** the "Custom Start Command" field in Railway UI Settings. If it's set to `node server/index.js`, it will override railway.toml and cause deployment to fail.
 
 ## Environment Variables
 
