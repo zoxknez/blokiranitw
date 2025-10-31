@@ -680,7 +680,8 @@ app.get('/api/users/:id', (req, res) => {
 });
 
 // Add new blocked user (admin only)
-app.post('/api/users', adminWriteLimiter, authenticateToken, requireAdminIp, ensureJson, (req, res) => {
+// Uklonjen requireAdminIp - dovoljna je autentifikacija preko tokena
+app.post('/api/users', adminWriteLimiter, authenticateToken, ensureJson, (req, res) => {
   const parsed = UserUpsertSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'Invalid payload' });
   const { username, profile_url } = parsed.data;
@@ -713,7 +714,8 @@ app.post('/api/users', adminWriteLimiter, authenticateToken, requireAdminIp, ens
 });
 
 // Update blocked user (admin only)
-app.put('/api/users/:id', adminWriteLimiter, authenticateToken, requireAdminIp, ensureJson, (req, res) => {
+// Uklonjen requireAdminIp - dovoljna je autentifikacija preko tokena
+app.put('/api/users/:id', adminWriteLimiter, authenticateToken, ensureJson, (req, res) => {
   const { id } = req.params;
   const parsed = UserUpsertSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'Invalid payload' });
@@ -751,7 +753,8 @@ app.put('/api/users/:id', adminWriteLimiter, authenticateToken, requireAdminIp, 
 });
 
 // Delete blocked user (admin only)
-app.delete('/api/users/:id', adminWriteLimiter, authenticateToken, requireAdminIp, (req, res) => {
+// Uklonjen requireAdminIp - dovoljna je autentifikacija preko tokena
+app.delete('/api/users/:id', adminWriteLimiter, authenticateToken, (req, res) => {
   const { id } = req.params;
   
   db.run("DELETE FROM blocked_users WHERE id = ?", [id], function(err) {
@@ -928,6 +931,45 @@ app.post('/api/suggestions', suggestLimiter, authenticateToken, ensureJson, asyn
   });
 });
 
+// Admin routes - Audit log
+app.get('/api/admin/audit', authenticateToken, (req, res) => {
+  const page = Math.max(parseInt(req.query.page) || 1, 1);
+  const limit = Math.min(parseInt(req.query.limit) || 20, 100);
+  const offset = (page - 1) * limit;
+
+  const query = `SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT ? OFFSET ?`;
+  const countQuery = `SELECT COUNT(*) as total FROM audit_logs`;
+
+  db.get(countQuery, [], (err, countRow) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+
+    db.all(query, [limit, offset], (err, rows) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+
+      res.json({
+        logs: rows.map(row => ({
+          id: row.id,
+          action: row.action,
+          actor: row.actor,
+          target: row.target,
+          details: row.details ? JSON.parse(row.details) : null,
+          created_at: row.created_at
+        })),
+        pagination: {
+          page,
+          limit,
+          total: countRow?.total || 0,
+          pages: Math.ceil((countRow?.total || 0) / limit)
+        }
+      });
+    });
+  });
+});
+
 // Admin routes for suggestions (require authentication)
 app.get('/api/admin/suggestions', authenticateToken, (req, res) => {
   const status = String(req.query.status || 'pending');
@@ -970,7 +1012,8 @@ app.get('/api/admin/suggestions', authenticateToken, (req, res) => {
   });
 });
 
-app.put('/api/admin/suggestions/:id/approve', adminWriteLimiter, authenticateToken, requireAdminIp, (req, res) => {
+// Uklonjen requireAdminIp - dovoljna je autentifikacija preko tokena
+app.put('/api/admin/suggestions/:id/approve', adminWriteLimiter, authenticateToken, (req, res) => {
   const { id } = req.params;
   const { username } = req.user;
   
@@ -1023,7 +1066,8 @@ app.put('/api/admin/suggestions/:id/approve', adminWriteLimiter, authenticateTok
   });
 });
 
-app.put('/api/admin/suggestions/:id/reject', adminWriteLimiter, authenticateToken, requireAdminIp, (req, res) => {
+// Uklonjen requireAdminIp - dovoljna je autentifikacija preko tokena
+app.put('/api/admin/suggestions/:id/reject', adminWriteLimiter, authenticateToken, (req, res) => {
   const { id } = req.params;
   const { username } = req.user;
   

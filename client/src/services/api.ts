@@ -140,19 +140,25 @@ export const userService = {
 
   // Add new user
   addUser: async (username: string, profile_url: string): Promise<BlockedUser> => {
-    const response = await api.post('/users', { username, profile_url });
+    const response = await api.post('/users', { username, profile_url }, {
+      headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+    });
     return response.data;
   },
 
   // Update user
   updateUser: async (id: number, username: string, profile_url: string): Promise<BlockedUser> => {
-    const response = await api.put(`/users/${id}`, { username, profile_url });
+    const response = await api.put(`/users/${id}`, { username, profile_url }, {
+      headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+    });
     return response.data;
   },
 
   // Delete user
   deleteUser: async (id: number): Promise<void> => {
-    await api.delete(`/users/${id}`);
+    await api.delete(`/users/${id}`, {
+      headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+    });
   },
 
   // Get statistics
@@ -168,9 +174,22 @@ export const userService = {
     const response = await api.post('/import', formData, {
       headers: {
         'Content-Type': 'multipart/form-data',
+        'Authorization': `Bearer ${localStorage.getItem('token')}`
       },
     });
     
+    return response.data;
+  },
+};
+
+// Admin service
+export const adminService = {
+  // Get audit logs
+  getAuditLogs: async (page: number = 1, limit: number = 20): Promise<{ logs: any[]; pagination: any }> => {
+    const response = await api.get('/admin/audit', {
+      params: { page, limit },
+      headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+    });
     return response.data;
   },
 };
