@@ -434,9 +434,14 @@ function importFromJSON() {
 
 // Routes
 
-// Health check (do not depend on DB to pass platform health probes)
+// Health check endpoints (do not depend on DB to pass platform health probes)
 app.get('/api/health', (req, res) => {
   res.status(200).json({ ok: true });
+});
+
+// Root endpoint for Railway healthcheck (must be before static file serving)
+app.get('/', (req, res) => {
+  res.status(200).json({ service: 'api', ok: true });
 });
 
 // Auth routes
@@ -956,27 +961,24 @@ app.put('/api/admin/suggestions/:id/reject', adminWriteLimiter, authenticateToke
   );
 });
 
-// Serve static files in production only if build exists; otherwise expose simple root
+// Serve static files in production only if build exists
 if (process.env.NODE_ENV === 'production') {
   const buildDir = path.join(__dirname, '../client/build');
   if (fs.existsSync(buildDir)) {
     app.use(express.static(buildDir));
+    // Catch-all handler for client routes (SPA)
     app.get('*', (req, res, next) => {
+      // Skip API routes
+      if (req.path.startsWith('/api/')) {
+        return next();
+      }
       const indexPath = path.join(buildDir, 'index.html');
       if (fs.existsSync(indexPath)) {
         return res.sendFile(indexPath);
       }
-      return res.status(200).json({ service: 'api', ok: true });
-    });
-  } else {
-    app.get('/', (req, res) => {
-      res.status(200).json({ service: 'api', ok: true });
+      return next();
     });
   }
-} else {
-  app.get('/', (req, res) => {
-    res.status(200).json({ service: 'api', ok: true });
-  });
 }
 
 // Global error handler to avoid crashes
@@ -997,6 +999,9 @@ process.on('uncaughtException', (err) => {
 
 app.listen(PORT, HOST, () => {
   console.log(`Server running on http://${HOST}:${PORT}`);
+  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`Health check available at: http://${HOST}:${PORT}/`);
+  console.log(`API health check available at: http://${HOST}:${PORT}/api/health`);
 });
 
 // Graceful shutdown

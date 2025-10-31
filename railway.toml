@@ -1,7 +1,7 @@
 [build]
-command = "npm install -ws --ignore-scripts"
+command = "npm install --omit=dev"
 
 [start]
-command = "node server/index.js"
+command = "node index.js"
 
 
