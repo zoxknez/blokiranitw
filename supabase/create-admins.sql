@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS public.admin_users (
   username VARCHAR(255) UNIQUE NOT NULL,
   email VARCHAR(255) UNIQUE NOT NULL,
   password_hash TEXT NOT NULL,
-  role VARCHAR(50) DEFAULT 'admin',
+  role VARCHAR(50) DEFAULT 'user',
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   last_login TIMESTAMP
 );

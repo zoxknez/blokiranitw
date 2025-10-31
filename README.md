@@ -182,6 +182,50 @@ npm run build
 
 Vidi [SUPABASE_PRODUCTION.md](./SUPABASE_PRODUCTION.md) za detaljne instrukcije.
 
+## 👤 Admin Setup
+
+### Automatsko kreiranje admin korisnika (CLI)
+
+Najlakši način za kreiranje admin korisnika:
+
+```bash
+cd server
+npm run setup-admins
+```
+
+Skripta će interaktivno pitati za:
+- Broj admin korisnika
+- Username, email i password za svakog
+
+**Non-interaktivni režim:**
+```bash
+cd server
+npm run setup-admins -- --non-interactive --count 2
+```
+
+**Za Railway deployment:**
+```bash
+railway run npm run setup-admins
+```
+
+Vidi [SETUP_ADMINS_CLI.md](./SETUP_ADMINS_CLI.md) za detaljne instrukcije.
+
+### Ručno kreiranje (SQL)
+
+Alternativno, koristi SQL script iz `railway-create-admins.sql`:
+1. Railway Dashboard → Data tab → Query
+2. Kopiraj i pokreni SQL script
+3. Vidi [RAILWAY_ADMIN_SETUP.md](./RAILWAY_ADMIN_SETUP.md) za detalje
+
+### Default Admin Credentials
+
+| Username | Email | Password |
+|----------|-------|----------|
+| admin1 | admin1@example.com | Admin123! |
+| admin2 | admin2@example.com | Admin123! |
+
+**⚠️ VAŽNO:** Promeni passworde nakon prvog logina!
+
 ## 🔐 Autentifikacija i Admin Panel
 
 ### Javni pristup

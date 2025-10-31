@@ -52,7 +52,27 @@ function initializeDatabase() {
     }
   });
 
-  // Admin users table
+  // Users table (regular users - NO role column)
+  db.run(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT UNIQUE NOT NULL,
+      email TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      last_login DATETIME
+    )
+  `, (err) => {
+    if (err) {
+      console.error('Error creating users table:', err.message);
+    } else {
+      console.log('✓ users table ready');
+      db.run(`CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);`);
+      db.run(`CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);`);
+    }
+  });
+
+  // Admin users table (admins only - WITH role column)
   db.run(`
     CREATE TABLE IF NOT EXISTS admin_users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -67,6 +87,7 @@ function initializeDatabase() {
     if (err) {
       console.error('Error creating admin_users table:', err.message);
     } else {
+      console.log('✓ admin_users table ready');
       console.log('Database tables ready');
       checkAndImportData();
     }

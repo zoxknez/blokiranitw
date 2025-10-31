@@ -7,6 +7,7 @@ const path = require('path');
 const fs = require('fs');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const { createClient } = require('@supabase/supabase-js');
 // helmet is optional; set critical headers manually to avoid runtime deps issues
 // Lightweight rate limiter (no external deps)
 const { randomUUID } = require('crypto');
@@ -16,10 +17,33 @@ const app = express();
 const PORT = process.env.PORT || 8080;
 const HOST = process.env.HOST || '0.0.0.0';
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
-const SUPABASE_JWKS_URL = process.env.SUPABASE_JWKS_URL || 'https://kvbppgfwqnwvwubaendh.supabase.co/auth/v1/keys';
+// Determine JWKS URL to validate Supabase RS256 tokens.
+// Prefer explicit env override. If running in development or when SUPABASE_URL
+// points to localhost/127.0.0.1, use local Supabase JWKS endpoint so auth works
+// against a locally started Supabase stack.
+function resolveSupabaseJwks() {
+  if (process.env.SUPABASE_JWKS_URL) return process.env.SUPABASE_JWKS_URL;
+  const suppliedBase = (process.env.SUPABASE_URL || process.env.REACT_APP_SUPABASE_URL || '').trim();
+  try {
+    if (suppliedBase.includes('127.0.0.1') || suppliedBase.includes('localhost')) {
+      return (suppliedBase.replace(/\/$/, '') || 'http://127.0.0.1:54321') + '/auth/v1/keys';
+    }
+  } catch (e) {}
+  if ((process.env.NODE_ENV || '').toLowerCase() === 'development') {
+    return 'http://127.0.0.1:54321/auth/v1/keys';
+  }
+  return 'https://kvbppgfwqnwvwubaendh.supabase.co/auth/v1/keys';
+}
+const SUPABASE_JWKS_URL = resolveSupabaseJwks();
 const CAPTCHA_PROVIDER = (process.env.CAPTCHA_PROVIDER || '').toLowerCase(); // 'turnstile' | 'recaptcha'
 const CAPTCHA_SECRET = process.env.CAPTCHA_SECRET || '';
 const CAPTCHA_REQUIRED = (process.env.CAPTCHA_REQUIRED || 'false') === 'true';
+
+// Supabase client za pristup Supabase bazi (za proveru role-a Supabase korisnika)
+const SUPABASE_URL = process.env.SUPABASE_URL || process.env.REACT_APP_SUPABASE_URL || 'https://kvbppgfwqnwvwubaendh.supabase.co';
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || process.env.REACT_APP_SUPABASE_ANON_KEY || 
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt2YnBwZ2Z3cW53dnd1YmFlbmRoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjE3NjcwNzYsImV4cCI6MjA3NzM0MzA3Nn0.qs-Vk8rwl2DNq5T7hDw4W9Fi6lSdWzET35sdy2anv9U';
+const supabaseClient = (SUPABASE_URL && SUPABASE_ANON_KEY) ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
 
 // Early boot log
 try { console.log(`Booting API process. HOST=${HOST} PORT=${PORT}`); } catch {}
@@ -146,11 +170,60 @@ async function getJWKS() {
     if (jwksCache && (Date.now() - jwksCache.fetchedAt < 60 * 60 * 1000)) {
       return jwksCache.keys;
     }
-    const res = await fetch(SUPABASE_JWKS_URL);
-    if (!res.ok) throw new Error(`JWKS fetch failed: ${res.status}`);
-    const data = await res.json();
-    jwksCache = { keys: Array.isArray(data.keys) ? data.keys : [], fetchedAt: Date.now() };
-    return jwksCache.keys;
+
+    // Build candidate JWKS URLs to support different Supabase local/remote layouts
+    const candidates = [];
+    if (process.env.SUPABASE_JWKS_URL) candidates.push(process.env.SUPABASE_JWKS_URL);
+    const suppliedBase = (process.env.SUPABASE_URL || process.env.REACT_APP_SUPABASE_URL || '').trim();
+    try {
+      if (suppliedBase) {
+        const base = suppliedBase.replace(/\/$/, '');
+        candidates.push(`${base}/auth/v1/keys`);
+        candidates.push(`${base}/auth/v1/.well-known/jwks.json`);
+        candidates.push(`${base}/auth/v1/jwks`);
+        candidates.push(`${base}/keys`);
+        candidates.push(`${base}/.well-known/jwks.json`);
+      }
+    } catch (e) {}
+
+    // Local Supabase development defaults
+    candidates.push('http://127.0.0.1:54321/auth/v1/keys');
+    candidates.push('http://127.0.0.1:54321/auth/v1/.well-known/jwks.json');
+    candidates.push('http://127.0.0.1:54321/keys');
+    candidates.push('http://127.0.0.1:54321/.well-known/jwks.json');
+
+    // Deduplicate while preserving order
+    const seen = new Set();
+    const uniq = candidates.filter(c => c && !seen.has(c) && (seen.add(c), true));
+
+    for (const url of uniq) {
+      try {
+        // fetch with timeout
+        const controller = new AbortController();
+        const id = setTimeout(() => controller.abort(), 8000);
+        const res = await fetch(url, { signal: controller.signal });
+        clearTimeout(id);
+        if (!res.ok) {
+          console.debug(`JWKS probe ${url} -> ${res.status}`);
+          continue;
+        }
+        const data = await res.json();
+        const keys = Array.isArray(data.keys) ? data.keys : (Array.isArray(data) ? data : []);
+        if (!keys || keys.length === 0) {
+          console.debug(`JWKS probe ${url} -> no keys found`);
+          continue;
+        }
+        jwksCache = { keys, fetchedAt: Date.now(), url };
+        console.log(`JWKS fetched from ${url} (keys: ${keys.length})`);
+        return jwksCache.keys;
+      } catch (err) {
+        console.debug(`JWKS probe ${url} -> error: ${err?.message || err}`);
+        continue;
+      }
+    }
+
+    console.error('JWKS Error: no reachable JWKS endpoint among candidates');
+    return [];
   } catch (e) {
     try { console.error('JWKS Error:', e?.message || e); } catch {}
     return [];
@@ -204,14 +277,129 @@ const authenticateToken = async (req, res, next) => {
     
     if (decodedHeader.alg === 'RS256') {
       payload = await verifySupabaseJwt(token);
-      req.user = { id: payload.sub, username: payload.user_metadata?.username || payload.email };
+      const email = payload.email;
+      const username = payload.user_metadata?.username || email?.split('@')[0] || '';
+      
+      // Proveri korisnika u Supabase bazi
+      // Prvo proveri u users tabeli (obični korisnici), pa u admin_users (admini)
+      if (supabaseClient) {
+        try {
+          // Probaj prvo u users tabeli (obični korisnici)
+          let { data: supabaseUser, error: supabaseError } = await supabaseClient
+            .from('users')
+            .select('id, username, email')
+            .eq('email', email)
+            .single();
+
+          if (supabaseError && supabaseError.code === 'PGRST116') {
+            // Probaj po username-u
+            const { data: userByUsername, error: usernameError } = await supabaseClient
+              .from('users')
+              .select('id, username, email')
+              .eq('username', username)
+              .single();
+            
+            if (!usernameError && userByUsername) {
+              supabaseUser = userByUsername;
+              supabaseError = null;
+            }
+          }
+
+          if (!supabaseError && supabaseUser) {
+            // Korisnik je običan korisnik (users tabela)
+            req.user = {
+              id: supabaseUser.id,
+              username: supabaseUser.username,
+              email: supabaseUser.email,
+              role: 'user'
+            };
+            return next();
+          }
+
+          // Ako nije u users, proveri u admin_users
+          let { data: supabaseAdmin, error: adminError } = await supabaseClient
+            .from('admin_users')
+            .select('id, username, email, role')
+            .eq('email', email)
+            .single();
+
+          if (adminError && adminError.code === 'PGRST116') {
+            // Probaj po username-u
+            const { data: adminByUsername, error: adminUsernameError } = await supabaseClient
+              .from('admin_users')
+              .select('id, username, email, role')
+              .eq('username', username)
+              .single();
+            
+            if (!adminUsernameError && adminByUsername) {
+              supabaseAdmin = adminByUsername;
+              adminError = null;
+            } else {
+              adminError = adminUsernameError;
+            }
+          }
+
+          if (adminError) {
+            if (adminError.code === 'PGRST116') {
+              console.warn(`[${req.id}] Supabase user ${email || username} not found in Supabase database`);
+              return res.status(403).json({ error: 'User not authorized. Please register through the application.' });
+            }
+            throw adminError;
+          }
+
+          if (supabaseAdmin) {
+            // Korisnik je admin (admin_users tabela)
+            req.user = {
+              id: supabaseAdmin.id,
+              username: supabaseAdmin.username,
+              email: supabaseAdmin.email,
+              role: supabaseAdmin.role || 'admin'
+            };
+            return next();
+          }
+
+          // Korisnik nije pronađen ni u users ni u admin_users
+          console.warn(`[${req.id}] Supabase user ${email || username} not found in Supabase database`);
+          return res.status(403).json({ error: 'User not authorized. Please register through the application.' });
+        } catch (supabaseErr) {
+          console.error(`[${req.id}] Supabase database error checking user role:`, supabaseErr.message);
+          // Fallback na lokalnu bazu ako Supabase ne radi
+          console.warn(`[${req.id}] Falling back to local database...`);
+        }
+      }
+
+      // Fallback: Proveri role iz lokalne SQLite baze (za backward compatibility)
+      db.get(
+        "SELECT id, username, email, role FROM admin_users WHERE email = ? OR username = ?",
+        [email, username],
+        (err, row) => {
+          if (err) {
+            console.error(`[${req.id}] Database error checking user role:`, err.message);
+            return res.status(403).json({ error: 'User not found in database' });
+          }
+          
+          if (!row) {
+            console.warn(`[${req.id}] User ${email || username} not found in database`);
+            return res.status(403).json({ error: 'User not authorized. Please register through the application.' });
+          }
+          
+          req.user = {
+            id: row.id,
+            username: row.username,
+            email: row.email,
+            role: row.role || 'user'
+          };
+          return next();
+        }
+      );
+      return; // Vrati iz funkcije, callback će pozvati next() ili res.status()
     } else if (decodedHeader.alg === 'HS256') {
       payload = await verifyLocalJwt(token);
       req.user = { id: payload.id, username: payload.username, email: payload.email, role: payload.role };
+      return next();
     } else {
       return res.status(400).json({ error: 'Unsupported JWT algorithm' });
     }
-    return next();
   } catch (err) {
     return res.status(403).json({ error: 'Invalid or expired token' });
   }
@@ -308,6 +496,21 @@ function requireAdminIp(req, res, next) {
   next();
 }
 
+// Routes are now in separate files - mount them below
+function requireAdmin(req, res, next) {
+  if (!req.user) {
+    return res.status(401).json({ error: 'Authentication required' });
+  }
+  
+  const userRole = req.user.role;
+  if (userRole !== 'admin') {
+    console.warn(`[${req.id}] Non-admin user ${req.user.username} (role: ${userRole}) attempted to access admin route`);
+    return res.status(403).json({ error: 'Admin access required' });
+  }
+  
+  next();
+}
+
 // Zod schemas
 const SuggestionItemSchema = z.object({
   username: z.string().min(1).max(50),
@@ -396,7 +599,27 @@ function initializeDatabase() {
     db.run(`CREATE INDEX IF NOT EXISTS idx_suggestions_username ON user_suggestions(username);`);
   });
 
-  // Admin users table
+  // Users table (obični korisnici - BEZ role kolone)
+  db.run(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT UNIQUE NOT NULL,
+      email TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      last_login DATETIME
+    )
+  `, (err) => {
+    if (err) {
+      console.error('Error creating users table:', err.message);
+    } else {
+      console.log('✓ users table ready');
+      db.run(`CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);`);
+      db.run(`CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);`);
+    }
+  });
+
+  // Admin users table (SAMO admini - SA role kolonom)
   db.run(`
     CREATE TABLE IF NOT EXISTS admin_users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -411,7 +634,24 @@ function initializeDatabase() {
     if (err) {
       console.error('Error creating admin_users table:', err.message);
     } else {
-      console.log('Database tables ready');
+      console.log('✓ admin_users table ready');
+      // Check if there are any admin users
+      db.get("SELECT COUNT(*) as count FROM admin_users", (err, row) => {
+        if (err) {
+          console.error('Error checking admin users:', err.message);
+        } else {
+          console.log(`Current admin users in database: ${row.count}`);
+          if (row.count === 0) {
+            console.warn('⚠ WARNING: No admin users found in database!');
+            console.warn('⚠ To create admin users, run the SQL script from supabase/create-admins.sql');
+            console.warn('⚠ Or use the admin setup scripts in server/scripts (requires DB access)');
+          }
+          if (row.count > 5) {
+            console.warn('⚠ WARNING: Large number of admin users detected. Verify this is expected.');
+            console.warn('⚠ If you suspect accidental public admin creation, run server/scripts/demote-admins.js to demote non-whitelisted users.');
+          }
+        }
+      });
       // Import existing JSON data if table is empty
       checkAndImportData();
     }
@@ -487,607 +727,14 @@ function importFromJSON() {
   }
 }
 
-// Routes
+// Routes - mount route modules
+app.use('/api/users', require('./routes/users'));
+app.use('/api/admin', require('./routes/admin'));
+app.use('/api/suggestions', require('./routes/suggestions'));
+app.use('/api/stats', require('./routes/stats'));
+app.use(require('./routes/auth'));
+app.use(require('./routes/health'));
 
-// Health check endpoints (do not depend on DB to pass platform health probes)
-app.get('/api/health', (req, res) => {
-  res.status(200).json({ ok: true });
-});
-
-// Root endpoint for Railway healthcheck (must be before static file serving)
-app.get('/', (req, res) => {
-  res.status(200).json({ service: 'api', ok: true });
-});
-
-// Auth routes
-app.post('/api/auth/register', async (req, res) => {
-  res.set('Cache-Control', 'no-store');
-  const { username, email, password } = req.body;
-  
-  if (!username || !email || !password) {
-    return res.status(400).json({ error: 'All fields are required' });
-  }
-
-  try {
-    // Check if user already exists
-    db.get("SELECT * FROM admin_users WHERE username = ? OR email = ?", [username, email], async (err, row) => {
-      if (err) {
-        return res.status(500).json({ error: err.message });
-      }
-      
-      if (row) {
-        return res.status(400).json({ error: 'User already exists' });
-      }
-
-      // Hash password
-      const saltRounds = 10;
-      const passwordHash = await bcrypt.hash(password, saltRounds);
-
-      // Create user
-      db.run(
-        "INSERT INTO admin_users (username, email, password_hash) VALUES (?, ?, ?)",
-        [username, email, passwordHash],
-        function(err) {
-          if (err) {
-            return res.status(500).json({ error: err.message });
-          }
-
-          const token = jwt.sign(
-            { id: this.lastID, username, email, role: 'admin' },
-            JWT_SECRET,
-            { expiresIn: '24h' }
-          );
-
-          res.status(201).json({
-            message: 'User created successfully',
-            token,
-            user: { id: this.lastID, username, email, role: 'admin' }
-          });
-        }
-      );
-    });
-  } catch (error) {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-app.post('/api/auth/login', async (req, res) => {
-  res.set('Cache-Control', 'no-store');
-  const { username, password } = req.body;
-  
-  if (!username || !password) {
-    return res.status(400).json({ error: 'Username and password are required' });
-  }
-
-  try {
-    db.get("SELECT * FROM admin_users WHERE username = ?", [username], async (err, row) => {
-      if (err) {
-        return res.status(500).json({ error: err.message });
-      }
-      
-      if (!row) {
-        return res.status(401).json({ error: 'Invalid credentials' });
-      }
-
-      const isValidPassword = await bcrypt.compare(password, row.password_hash);
-      if (!isValidPassword) {
-        return res.status(401).json({ error: 'Invalid credentials' });
-      }
-
-      // Update last login
-      db.run("UPDATE admin_users SET last_login = CURRENT_TIMESTAMP WHERE id = ?", [row.id]);
-
-      const token = jwt.sign(
-        { id: row.id, username: row.username, email: row.email, role: row.role },
-        JWT_SECRET,
-        { expiresIn: '24h' }
-      );
-
-      res.json({
-        message: 'Login successful',
-        token,
-        user: { id: row.id, username: row.username, email: row.email, role: row.role }
-      });
-    });
-  } catch (error) {
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// Get all blocked users with pagination and search
-app.get('/api/users', (req, res) => {
-  const page = coercePage(req.query.page || 1);
-  const limit = coerceLimit(req.query.limit || 50);
-  const search = String(req.query.search || '');
-  const sort = coerceSort(req.query.sort || 'username');
-  const order = coerceOrder(req.query.order || 'ASC');
-  const dateRange = String(req.query.dateRange || 'all');
-  const offset = (page - 1) * limit;
-  
-  const searchTerm = `%${search}%`;
-
-  // Build date filter for SQLite
-  let dateCondition = '';
-  if (dateRange === 'today') {
-    dateCondition = " AND date(created_at) = date('now')";
-  } else if (dateRange === '7d') {
-    dateCondition = " AND datetime(created_at) >= datetime('now','-7 days')";
-  } else if (dateRange === '30d') {
-    dateCondition = " AND datetime(created_at) >= datetime('now','-30 days')";
-  }
-
-  let query = `
-    SELECT * FROM blocked_users 
-    WHERE username LIKE ?${dateCondition}
-    ORDER BY ${sort} ${order}
-    LIMIT ? OFFSET ?
-  `;
-  
-  let countQuery = `
-    SELECT COUNT(*) as total FROM blocked_users 
-    WHERE username LIKE ?${dateCondition}
-  `;
-  
-  // Add timeout for database operations
-  const queryTimeout = setTimeout(() => {
-    if (!res.headersSent) {
-      res.status(504).json({ error: 'Database query timeout' });
-    }
-  }, 25000); // 25 second timeout for queries
-  
-  db.get(countQuery, [searchTerm], (err, countRow) => {
-    if (err) {
-      clearTimeout(queryTimeout);
-      console.error('Database error in /api/users count:', err.message);
-      return res.status(500).json({ error: 'Database error' });
-    }
-    
-    db.all(query, [searchTerm, parseInt(limit), parseInt(offset)], (err, rows) => {
-      clearTimeout(queryTimeout);
-      if (err) {
-        console.error('Database error in /api/users query:', err.message);
-        return res.status(500).json({ error: 'Database error' });
-      }
-      
-      res.json({
-        users: rows || [],
-        pagination: {
-          page: page,
-          limit: limit,
-          total: countRow?.total || 0,
-          pages: Math.ceil((countRow?.total || 0) / limit)
-        }
-      });
-    });
-  });
-});
-
-// Get user by ID
-app.get('/api/users/:id', (req, res) => {
-  const { id } = req.params;
-  
-  db.get("SELECT * FROM blocked_users WHERE id = ?", [id], (err, row) => {
-    if (err) {
-      return res.status(500).json({ error: err.message });
-    }
-    
-    if (!row) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-    
-    res.json(row);
-  });
-});
-
-// Add new blocked user (admin only)
-// Uklonjen requireAdminIp - dovoljna je autentifikacija preko tokena
-app.post('/api/users', adminWriteLimiter, authenticateToken, ensureJson, (req, res) => {
-  const parsed = UserUpsertSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: 'Invalid payload' });
-  const { username, profile_url } = parsed.data;
-  
-  if (!username || !profile_url) {
-    return res.status(400).json({ error: 'Username and profile URL are required' });
-  }
-  
-  if (!isAllowedProfileUrl(profile_url)) {
-    return res.status(400).json({ error: 'Only Twitter/X profile URLs are allowed' });
-  }
-  
-  db.run(
-    "INSERT INTO blocked_users (username, profile_url) VALUES (?, ?)",
-    [username, profile_url],
-    function(err) {
-      if (err) {
-        return res.status(500).json({ error: err.message });
-      }
-      
-      writeAudit('users.create', req.user?.username, username);
-      res.status(201).json({
-        id: this.lastID,
-        username,
-        profile_url,
-        message: 'User added successfully'
-      });
-    }
-  );
-});
-
-// Update blocked user (admin only)
-// Uklonjen requireAdminIp - dovoljna je autentifikacija preko tokena
-app.put('/api/users/:id', adminWriteLimiter, authenticateToken, ensureJson, (req, res) => {
-  const { id } = req.params;
-  const parsed = UserUpsertSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: 'Invalid payload' });
-  const { username, profile_url } = parsed.data;
-  
-  if (!username || !profile_url) {
-    return res.status(400).json({ error: 'Username and profile URL are required' });
-  }
-  
-  if (!isAllowedProfileUrl(profile_url)) {
-    return res.status(400).json({ error: 'Only Twitter/X profile URLs are allowed' });
-  }
-  
-  db.run(
-    "UPDATE blocked_users SET username = ?, profile_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-    [username, profile_url, id],
-    function(err) {
-      if (err) {
-        return res.status(500).json({ error: err.message });
-      }
-      
-      if (this.changes === 0) {
-        return res.status(404).json({ error: 'User not found' });
-      }
-      
-      writeAudit('users.update', req.user?.username, String(id), { username, profile_url });
-      res.json({
-        id: parseInt(id),
-        username,
-        profile_url,
-        message: 'User updated successfully'
-      });
-    }
-  );
-});
-
-// Delete blocked user (admin only)
-// Uklonjen requireAdminIp - dovoljna je autentifikacija preko tokena
-app.delete('/api/users/:id', adminWriteLimiter, authenticateToken, (req, res) => {
-  const { id } = req.params;
-  
-  db.run("DELETE FROM blocked_users WHERE id = ?", [id], function(err) {
-    if (err) {
-      return res.status(500).json({ error: err.message });
-    }
-    
-    if (this.changes === 0) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-    
-    writeAudit('users.delete', req.user?.username, String(id));
-    res.json({ message: 'User deleted successfully' });
-  });
-});
-
-// Bulk import from JSON file (admin only)
-app.post('/api/import', adminWriteLimiter, authenticateToken, requireAdminIp, upload.single('file'), (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ error: 'No file uploaded' });
-  }
-  
-  try {
-    const content = fs.readFileSync(req.file.path, 'utf8');
-    if (content.length > 2 * 1024 * 1024) { // 2MB guard
-      fs.unlinkSync(req.file.path);
-      return res.status(413).json({ error: 'File too large' });
-    }
-    const jsonData = JSON.parse(content);
-    if (!Array.isArray(jsonData)) {
-      fs.unlinkSync(req.file.path);
-      return res.status(400).json({ error: 'JSON must be an array' });
-    }
-    if (jsonData.length > 5000) { // hard cap
-      fs.unlinkSync(req.file.path);
-      return res.status(400).json({ error: 'Too many records' });
-    }
-    
-    // Use UPSERT instead of REPLACE to preserve ID and timestamps
-    const stmt = db.prepare(`
-      INSERT INTO blocked_users (username, profile_url)
-      VALUES (?, ?)
-      ON CONFLICT(username) DO UPDATE SET
-        profile_url = excluded.profile_url,
-        updated_at = CURRENT_TIMESTAMP
-    `);
-    
-    let processed = 0;
-    let imported = 0;
-    let errors = 0;
-    const total = jsonData.length;
-    
-    function finish() {
-      stmt.finalize(() => {
-        try { fs.unlinkSync(req.file.path); } catch {}
-        writeAudit('users.import', req.user?.username, '', { imported, errors, total });
-        res.json({
-          message: 'Import completed',
-          imported,
-          errors,
-          total
-        });
-      });
-    }
-    
-    jsonData.forEach((user) => {
-      const username = String(user.username || '').trim().replace(/^@/, '');
-      const profileUrl = String(user.profile_url || '').trim();
-      
-      if (!username || !profileUrl || !isAllowedProfileUrl(profileUrl)) {
-        errors++;
-        processed++;
-        if (processed === total) finish();
-        return;
-      }
-      
-      stmt.run([username, profileUrl], (err) => {
-        if (err) {
-          errors++;
-        } else {
-          imported++;
-        }
-        processed++;
-        if (processed === total) finish();
-      });
-    });
-  } catch (error) {
-    fs.unlinkSync(req.file.path); // Clean up uploaded file
-    res.status(500).json({ error: 'Invalid JSON file' });
-  }
-});
-
-// Get statistics
-app.get('/api/stats', (req, res) => {
-  // Add timeout for database operations
-  const queryTimeout = setTimeout(() => {
-    if (!res.headersSent) {
-      res.status(504).json({ error: 'Database query timeout' });
-    }
-  }, 25000); // 25 second timeout for queries
-  
-  db.get("SELECT COUNT(*) as total FROM blocked_users", (err, row) => {
-    clearTimeout(queryTimeout);
-    if (err) {
-      console.error('Database error in /api/stats:', err.message);
-      return res.status(500).json({ error: 'Database error' });
-    }
-    
-    res.json({
-      totalUsers: row?.total || 0,
-      lastUpdated: new Date().toISOString()
-    });
-  });
-});
-
-// Suggestions route (auth required, batch up to 50)
-app.post('/api/suggestions', suggestLimiter, authenticateToken, ensureJson, async (req, res) => {
-  const parse = SuggestionsSchema.safeParse(req.body);
-  if (!parse.success) return res.status(400).json({ error: 'Invalid payload' });
-  const { suggestions, captchaToken } = parse.data;
-  if (CAPTCHA_REQUIRED) {
-    const ok = await verifyCaptcha(captchaToken, req.ip);
-    if (!ok) return res.status(400).json({ error: 'Captcha verification failed' });
-  }
-
-  // Support single object fallback
-  let items = Array.isArray(suggestions) ? suggestions : [];
-
-  if (!items || items.length === 0) {
-    return res.status(400).json({ error: 'Provide suggestions array or username and profile_url' });
-  }
-
-  if (items.length > 50) {
-    return res.status(400).json({ error: 'Maximum 50 suggestions per submission' });
-  }
-
-  // Basic validation and normalization
-  const normalized = items
-    .map((it) => ({
-      username: (it.username || '').trim().replace(/^@/, ''),
-      profile_url: (it.profile_url || '').trim()
-    }))
-    .filter((it) => it.username && it.profile_url && isAllowedProfileUrl(it.profile_url));
-
-  if (normalized.length === 0) {
-    return res.status(400).json({ error: 'No valid items found' });
-  }
-
-  const stmt = db.prepare("INSERT INTO user_suggestions (username, profile_url, reason, suggested_by) VALUES (?, ?, ?, ?)");
-  let inserted = 0;
-  let errors = 0;
-  const suggestedBy = req.user?.username || 'Anonymous';
-
-  let completed = 0;
-  normalized.forEach((it) => {
-    stmt.run([it.username, it.profile_url, '', suggestedBy], (err) => {
-      if (err) {
-        errors++;
-      } else {
-        inserted++;
-      }
-      completed++;
-      if (completed === normalized.length) {
-        stmt.finalize();
-        writeAudit('suggestions.create', suggestedBy, String(inserted), { errors, total: normalized.length });
-        return res.status(201).json({
-          message: 'Suggestions submitted. They will be reviewed by an administrator.',
-          inserted,
-          errors,
-          total: normalized.length
-        });
-      }
-    });
-  });
-});
-
-// Admin routes - Audit log
-app.get('/api/admin/audit', authenticateToken, (req, res) => {
-  const page = Math.max(parseInt(req.query.page) || 1, 1);
-  const limit = Math.min(parseInt(req.query.limit) || 20, 100);
-  const offset = (page - 1) * limit;
-
-  const query = `SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT ? OFFSET ?`;
-  const countQuery = `SELECT COUNT(*) as total FROM audit_logs`;
-
-  db.get(countQuery, [], (err, countRow) => {
-    if (err) {
-      return res.status(500).json({ error: err.message });
-    }
-
-    db.all(query, [limit, offset], (err, rows) => {
-      if (err) {
-        return res.status(500).json({ error: err.message });
-      }
-
-      res.json({
-        logs: rows.map(row => ({
-          id: row.id,
-          action: row.action,
-          actor: row.actor,
-          target: row.target,
-          details: row.details ? JSON.parse(row.details) : null,
-          created_at: row.created_at
-        })),
-        pagination: {
-          page,
-          limit,
-          total: countRow?.total || 0,
-          pages: Math.ceil((countRow?.total || 0) / limit)
-        }
-      });
-    });
-  });
-});
-
-// Admin routes for suggestions (require authentication)
-app.get('/api/admin/suggestions', authenticateToken, (req, res) => {
-  const status = String(req.query.status || 'pending');
-  const page = Math.max(parseInt(req.query.page) || 1, 1);
-  const limit = Math.min(parseInt(req.query.limit) || 20, MAX_LIMIT);
-  const offset = (page - 1) * limit;
-  
-  let query = `
-    SELECT * FROM user_suggestions 
-    WHERE status = ? 
-    ORDER BY created_at DESC
-    LIMIT ? OFFSET ?
-  `;
-  
-  let countQuery = `
-    SELECT COUNT(*) as total FROM user_suggestions 
-    WHERE status = ?
-  `;
-  
-  db.get(countQuery, [status], (err, countRow) => {
-    if (err) {
-      return res.status(500).json({ error: err.message });
-    }
-    
-    db.all(query, [status, parseInt(limit), parseInt(offset)], (err, rows) => {
-      if (err) {
-        return res.status(500).json({ error: err.message });
-      }
-      
-      res.json({
-        suggestions: rows,
-        pagination: {
-          page: parseInt(page),
-          limit: parseInt(limit),
-          total: countRow.total,
-          pages: Math.ceil(countRow.total / limit)
-        }
-      });
-    });
-  });
-});
-
-// Uklonjen requireAdminIp - dovoljna je autentifikacija preko tokena
-app.put('/api/admin/suggestions/:id/approve', adminWriteLimiter, authenticateToken, (req, res) => {
-  const { id } = req.params;
-  const { username } = req.user;
-  
-  // First get the suggestion
-  db.get("SELECT * FROM user_suggestions WHERE id = ?", [id], (err, sug) => {
-    if (err) {
-      return res.status(500).json({ error: err.message });
-    }
-    
-    if (!sug) {
-      return res.status(404).json({ error: 'Suggestion not found' });
-    }
-    
-    if (sug.status !== 'pending') {
-      return res.status(400).json({ error: 'Suggestion already processed' });
-    }
-    
-    let addedToBlocked = false;
-    
-    // Add to blocked users
-    db.run(
-      "INSERT OR IGNORE INTO blocked_users (username, profile_url) VALUES (?, ?)",
-      [sug.username, sug.profile_url],
-      function(insertErr) {
-        if (insertErr) {
-          return res.status(500).json({ error: insertErr.message });
-        }
-        
-        // Check if row was actually inserted (this.changes > 0 means new row)
-        addedToBlocked = this.changes > 0;
-        
-        // Update suggestion status
-        db.run(
-          "UPDATE user_suggestions SET status = 'approved', reviewed_at = CURRENT_TIMESTAMP, reviewed_by = ? WHERE id = ?",
-          [username, id],
-          function(updateErr) {
-            if (updateErr) {
-              return res.status(500).json({ error: updateErr.message });
-            }
-            
-            writeAudit('suggestions.approve', username, String(id), { addedToBlocked });
-            res.json({
-              message: 'Suggestion approved',
-              addedToBlocked
-            });
-          }
-        );
-      }
-    );
-  });
-});
-
-// Uklonjen requireAdminIp - dovoljna je autentifikacija preko tokena
-app.put('/api/admin/suggestions/:id/reject', adminWriteLimiter, authenticateToken, (req, res) => {
-  const { id } = req.params;
-  const { username } = req.user;
-  
-  db.run(
-    "UPDATE user_suggestions SET status = 'rejected', reviewed_at = CURRENT_TIMESTAMP, reviewed_by = ? WHERE id = ?",
-    [username, id],
-    function(err) {
-      if (err) {
-        return res.status(500).json({ error: err.message });
-      }
-      
-      if (this.changes === 0) {
-        return res.status(404).json({ error: 'Suggestion not found' });
-      }
-      
-      writeAudit('suggestions.reject', username, String(id));
-      res.json({ message: 'Suggestion rejected' });
-    }
-  );
-});
 
 // Serve static files in production only if build exists
 if (process.env.NODE_ENV === 'production') {
