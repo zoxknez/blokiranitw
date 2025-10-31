@@ -103,6 +103,7 @@ const authenticateToken = async (req, res, next) => {
 
           if (!supabaseError && supabaseUser) {
             // Korisnik je običan korisnik (users tabela) - ROLE = 'user'
+            console.log(`[${req.id || 'auth'}] ✅ User found in users table: ${email} -> role='user'`);
             req.user = {
               id: supabaseUser.id,
               username: supabaseUser.username,
@@ -111,6 +112,9 @@ const authenticateToken = async (req, res, next) => {
             };
             return next();
           }
+
+          // AKO NIJE U users, PROVERI admin_users
+          console.log(`[${req.id || 'auth'}] ⚠️ User ${email} NOT found in users table, checking admin_users...`);
 
           // Ako nije u users, proveri u admin_users
           let { data: supabaseAdmin, error: adminError } = await supabaseClient
@@ -145,6 +149,7 @@ const authenticateToken = async (req, res, next) => {
 
           if (supabaseAdmin) {
             // Korisnik je admin (admin_users tabela)
+            console.log(`[${req.id || 'auth'}] ⚠️ User ${email} found in admin_users table -> role='${supabaseAdmin.role || 'admin'}'`);
             req.user = {
               id: supabaseAdmin.id,
               username: supabaseAdmin.username,
@@ -154,9 +159,21 @@ const authenticateToken = async (req, res, next) => {
             return next();
           }
 
-          // Korisnik nije pronađen ni u users ni u admin_users
-          console.warn(`[${req.id || 'auth'}] Supabase user ${email || username} not found in Supabase database`);
-          return res.status(403).json({ error: 'User not authorized. Please register through the application.' });
+          // VAŽNO: Korisnik nije pronađen ni u users ni u admin_users
+          // OVO ZNAČI da se korisnik možda registruje DIREKTNO u Supabase Auth, ali nije u našim tabelama
+          // U OVOM SLUČAJU, POSTAVI role='user' kao default (NE 'admin')
+          console.warn(`[${req.id || 'auth'}] ⚠️ User ${email || username} NOT found in users OR admin_users tables`);
+          console.warn(`[${req.id || 'auth'}] This user may have registered directly in Supabase Auth but not in our app`);
+          console.warn(`[${req.id || 'auth'}] Setting role='user' as default (NOT admin)`);
+          
+          // POSTAVI role='user' kao default, NE 'admin'
+          req.user = {
+            id: payload.sub || email,
+            username: username,
+            email: email,
+            role: 'user'  // DEFAULT JE 'user', NE 'admin'
+          };
+          return next();
         } catch (supabaseErr) {
           console.error(`[${req.id || 'auth'}] Supabase database error checking user role:`, supabaseErr.message);
           // Fallback na lokalnu bazu ako Supabase ne radi
@@ -194,10 +211,24 @@ const authenticateToken = async (req, res, next) => {
                 }
                 
                 if (!adminRow) {
-                  console.warn(`[${req.id || 'auth'}] User ${email || username} not found in database`);
-                  return res.status(403).json({ error: 'User not authorized. Please register through the application.' });
+                  // Korisnik nije ni u users ni u admin_users u lokalnoj bazi
+                  // OVO ZNAČI da se korisnik registruje DIREKTNO u Supabase Auth
+                  console.warn(`[${req.id || 'auth'}] ⚠️ User ${email || username} NOT found in local users OR admin_users`);
+                  console.warn(`[${req.id || 'auth'}] This user may have registered directly in Supabase Auth`);
+                  console.warn(`[${req.id || 'auth'}] Setting role='user' as default (NOT admin)`);
+                  
+                  // POSTAVI role='user' kao default, NE 'admin'
+                  req.user = {
+                    id: email || username,
+                    username: username,
+                    email: email,
+                    role: 'user'  // DEFAULT JE 'user', NE 'admin'
+                  };
+                  return next();
                 }
                 
+                // Korisnik JE u admin_users - to je admin
+                console.log(`[${req.id || 'auth'}] ⚠️ User ${email} found in local admin_users -> role='${adminRow.role || 'admin'}'`);
                 req.user = {
                   id: adminRow.id,
                   username: adminRow.username,
