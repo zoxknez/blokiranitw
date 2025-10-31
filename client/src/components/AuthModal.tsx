@@ -52,8 +52,9 @@ const AuthModal: React.FC<AuthModalProps> = ({
         newErrors.email = 'Email nije validan';
       }
     } else {
-      if (!formData.email.trim()) {
-        newErrors.email = 'Email je obavezan';
+      // Login: koristi username, ne email
+      if (!formData.username.trim()) {
+        newErrors.username = 'Korisničko ime je obavezno';
       }
     }
 
@@ -85,12 +86,14 @@ const AuthModal: React.FC<AuthModalProps> = ({
     setIsLoading(true);
     try {
       if (isLogin) {
-        const response = await authService.login(formData.email, formData.password);
+        // Login koristi username (backend API očekuje username)
+        const response = await authService.login(formData.username, formData.password);
         localStorage.setItem('token', response.token);
         localStorage.setItem('user', JSON.stringify(response.user));
         onSuccess();
         onClose();
       } else {
+        // Register koristi username, email i password
         const response = await authService.register(formData.username, formData.email, formData.password);
         localStorage.setItem('token', response.token);
         localStorage.setItem('user', JSON.stringify(response.user));
@@ -162,18 +165,18 @@ const AuthModal: React.FC<AuthModalProps> = ({
               )}
 
               <div className="space-y-4">
-                {/* Username */}
+                {/* Username (for login) or Username + Email (for register) */}
                 <div>
                   <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
                     <User className="inline h-4 w-4 mr-1" />
-                    Korisničko ime
+                    {isLogin ? 'Korisničko ime' : 'Korisničko ime'}
                   </label>
                   <input
                     type="text"
                     name="username"
                     value={formData.username}
                     onChange={handleChange}
-                    placeholder="Unesite korisničko ime"
+                    placeholder={isLogin ? "Unesite korisničko ime" : "Unesite korisničko ime"}
                     className={`input w-full ${errors.username ? 'border-red-500 focus:ring-red-500' : ''}`}
                     disabled={isLoading}
                   />

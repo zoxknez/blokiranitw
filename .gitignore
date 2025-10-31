@@ -105,3 +105,8 @@ Thumbs.db
 *.tmp
 *.temp
 .vercel
+
+# Supabase local development (keep config.toml and migrations)
+supabase/.branches
+supabase/.temp
+supabase/.volumes

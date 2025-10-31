@@ -34,6 +34,7 @@ Modern web aplikacija za pretragu i upravljanje blokiranim korisnicima sa Twitte
 ### Preduslovi
 - Node.js (v16 ili noviji)
 - npm ili yarn
+- Docker Desktop (za lokalni Supabase development)
 
 ### Korak 1: Kloniranje repozitorija
 ```bash
@@ -50,6 +51,22 @@ npm run install-all
 npm install
 cd server && npm install
 cd ../client && npm install
+```
+
+### Korak 2.5: Supabase CLI Setup (opciono za lokalni development)
+```bash
+# Supabase CLI je već instaliran kao dev dependency
+# Inicijalizuj Supabase projekat (već urađeno)
+npm run supabase:start   # Pokreni lokalni Supabase stack
+npm run supabase:status  # Proveri status servisa
+npm run supabase:stop    # Zaustavi lokalni stack
+
+# Prilikom prvog pokretanja, CLI će skinuti Docker image-e
+# Nakon pokretanja, videćeš credentials za lokalni Supabase:
+# - API URL: http://localhost:54321
+# - DB URL: postgresql://postgres:postgres@localhost:54322/postgres
+# - Studio URL: http://localhost:54323 (Supabase Studio UI)
+# - Mailpit URL: http://localhost:54324 (email testing)
 ```
 
 ### Korak 3: Pokretanje aplikacije
@@ -138,15 +155,32 @@ Aplikacija koristi moderni, čist dizajn sa:
 
 ## 🚀 Production build
 
+### Backend (Railway)
+
 ```bash
 # Build frontend
 cd client
 npm run build
 
-# Pokreni production server
-cd ../server
-NODE_ENV=production npm start
+# Railway će automatski pokrenuti server/index.js
+# Postavi environment variables u Railway Dashboard
 ```
+
+**Environment Variables za Railway:**
+- `SUPABASE_JWKS_URL`: `https://kvbppgfwqnwvwubaendh.supabase.co/auth/v1/keys`
+- `JWT_SECRET`: generiši jaki random secret
+- `ALLOWED_ORIGIN`: tvoj frontend URL
+- `FORCE_HTTPS`: `true`
+- `NODE_ENV`: `production`
+
+### Frontend (Vercel/Netlify)
+
+**Environment Variables za Frontend:**
+- `REACT_APP_SUPABASE_URL`: `https://kvbppgfwqnwvwubaendh.supabase.co`
+- `REACT_APP_SUPABASE_ANON_KEY`: `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt2YnBwZ2Z3cW53dnd1YmFlbmRoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjE3NjcwNzYsImV4cCI6MjA3NzM0MzA3Nn0.qs-Vk8rwl2DNq5T7hDw4W9Fi6lSdWzET35sdy2anv9U`
+- `REACT_APP_API_URL`: tvoj Railway backend URL
+
+Vidi [SUPABASE_PRODUCTION.md](./SUPABASE_PRODUCTION.md) za detaljne instrukcije.
 
 ## 🔐 Autentifikacija i Admin Panel
 

@@ -13,12 +13,25 @@
     "server": "cd server && npm run dev",
     "client": "cd client && npm start",
     "build": "npm run install-all && cd client && npm run build",
-    "install-all": "npm install && cd server && npm ci && cd ../client && npm ci"
+    "install-all": "npm install && cd server && npm ci && cd ../client && npm ci",
+    "supabase:init": "supabase init",
+    "supabase:start": "supabase start",
+    "supabase:stop": "supabase stop",
+    "supabase:status": "supabase status",
+    "supabase:db:reset": "supabase db reset",
+    "supabase:db:diff": "supabase db diff"
   },
-  "keywords": ["twitter", "blocked-users", "search", "react", "nodejs"],
+  "keywords": [
+    "twitter",
+    "blocked-users",
+    "search",
+    "react",
+    "nodejs"
+  ],
   "author": "Your Name",
   "license": "MIT",
   "devDependencies": {
-    "concurrently": "^8.2.2"
+    "concurrently": "^8.2.2",
+    "supabase": "^2.54.11"
   }
 }

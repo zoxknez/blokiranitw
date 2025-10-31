@@ -63,28 +63,15 @@ api.interceptors.response.use(
 // Auth service
 export const authService = {
   register: async (username: string, email: string, password: string): Promise<AuthResponse> => {
-    if (!supabase) throw new Error('Supabase not configured');
-    const { data, error } = await supabase.auth.signUp({ email, password, options: { data: { username } } });
-    if (error) throw error;
-    const session = data.session;
-    if (!session) throw new Error('Registration requires email confirmation');
-    localStorage.setItem('token', session.access_token);
-    const user: User = { id: 0, username, email, role: 'admin' };
-    localStorage.setItem('user', JSON.stringify(user));
-    return { message: 'Registered', token: session.access_token, user };
+    // Koristi backend API umesto Supabase
+    const response = await api.post('/auth/register', { username, email, password });
+    return response.data;
   },
 
-  login: async (email: string, password: string): Promise<AuthResponse> => {
-    if (!supabase) throw new Error('Supabase not configured');
-    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) throw error;
-    const session = data.session;
-    if (!session) throw new Error('No session');
-    localStorage.setItem('token', session.access_token);
-    const profileUsername = (data.user?.user_metadata as any)?.username || (data.user?.email?.split('@')[0] ?? 'user');
-    const user: User = { id: 0, username: profileUsername, email: data.user?.email || '', role: 'admin' };
-    localStorage.setItem('user', JSON.stringify(user));
-    return { message: 'Login successful', token: session.access_token, user };
+  login: async (username: string, password: string): Promise<AuthResponse> => {
+    // Koristi backend API umesto Supabase
+    const response = await api.post('/auth/login', { username, password });
+    return response.data;
   },
 
   getCurrentUser: (): User | null => {
