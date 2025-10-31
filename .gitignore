@@ -110,3 +110,6 @@ Thumbs.db
 supabase/.branches
 supabase/.temp
 supabase/.volumes
+# SQLite WAL files (auto-generated)
+*.db-shm
+*.db-wal
