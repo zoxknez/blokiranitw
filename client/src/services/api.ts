@@ -6,7 +6,7 @@ const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:5000/api
 
 const api = axios.create({
   baseURL: API_BASE_URL,
-  timeout: 10000,
+  timeout: 60000, // Increased to 60 seconds for slow database queries
 });
 
 // Supabase client (frontend)
@@ -15,6 +15,20 @@ const SUPABASE_ANON_KEY = process.env.REACT_APP_SUPABASE_ANON_KEY as string;
 export const supabase = (SUPABASE_URL && SUPABASE_ANON_KEY)
   ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
   : (null as any);
+
+// Retry logic helper
+async function retryRequest(requestFn: () => Promise<any>, retries = 3, delay = 1000): Promise<any> {
+  try {
+    return await requestFn();
+  } catch (error: any) {
+    if (retries > 0 && (error.code === 'ECONNABORTED' || error.message?.includes('timeout'))) {
+      console.log(`Request timeout, retrying... (${retries} retries left)`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+      return retryRequest(requestFn, retries - 1, delay * 2); // Exponential backoff
+    }
+    throw error;
+  }
+}
 
 // Request interceptor
 api.interceptors.request.use(
@@ -34,6 +48,14 @@ api.interceptors.response.use(
   },
   (error) => {
     console.error('API Error:', error.response?.data || error.message);
+    // Add more detailed error information
+    if (error.code === 'ECONNABORTED') {
+      console.error('Request timeout - the server is taking too long to respond');
+    } else if (error.code === 'ECONNREFUSED') {
+      console.error('Connection refused - is the server running?');
+    } else if (!error.response) {
+      console.error('Network error - no response from server');
+    }
     return Promise.reject(error);
   }
 );
@@ -121,14 +143,12 @@ export const suggestionService = {
 export const userService = {
   // Get users with search and pagination
   getUsers: async (params: SearchParams = {}): Promise<UsersResponse> => {
-    const response = await api.get('/users', { params });
-    return response.data;
+    return retryRequest(() => api.get('/users', { params }).then(res => res.data));
   },
 
   // Get user by ID
   getUser: async (id: number): Promise<BlockedUser> => {
-    const response = await api.get(`/users/${id}`);
-    return response.data;
+    return retryRequest(() => api.get(`/users/${id}`).then(res => res.data));
   },
 
   // Add new user
@@ -150,8 +170,7 @@ export const userService = {
 
   // Get statistics
   getStats: async (): Promise<Stats> => {
-    const response = await api.get('/stats');
-    return response.data;
+    return retryRequest(() => api.get('/stats').then(res => res.data));
   },
 
   // Import users from JSON file

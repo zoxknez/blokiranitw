@@ -293,6 +293,9 @@ const db = new sqlite3.Database(DB_PATH, (err) => {
   }
 });
 
+// Set database timeout to prevent hanging (30 seconds)
+db.configure('busyTimeout', 30000);
+
 // Initialize database tables
 function initializeDatabase() {
   // SQLite PRAGMAs for reliability
@@ -563,23 +566,34 @@ app.get('/api/users', (req, res) => {
     WHERE username LIKE ?${dateCondition}
   `;
   
+  // Add timeout for database operations
+  const queryTimeout = setTimeout(() => {
+    if (!res.headersSent) {
+      res.status(504).json({ error: 'Database query timeout' });
+    }
+  }, 25000); // 25 second timeout for queries
+  
   db.get(countQuery, [searchTerm], (err, countRow) => {
     if (err) {
-      return res.status(500).json({ error: err.message });
+      clearTimeout(queryTimeout);
+      console.error('Database error in /api/users count:', err.message);
+      return res.status(500).json({ error: 'Database error' });
     }
     
     db.all(query, [searchTerm, parseInt(limit), parseInt(offset)], (err, rows) => {
+      clearTimeout(queryTimeout);
       if (err) {
-        return res.status(500).json({ error: err.message });
+        console.error('Database error in /api/users query:', err.message);
+        return res.status(500).json({ error: 'Database error' });
       }
       
       res.json({
-        users: rows,
+        users: rows || [],
         pagination: {
           page: page,
           limit: limit,
-          total: countRow.total,
-          pages: Math.ceil(countRow.total / limit)
+          total: countRow?.total || 0,
+          pages: Math.ceil((countRow?.total || 0) / limit)
         }
       });
     });
@@ -750,13 +764,22 @@ app.post('/api/import', adminWriteLimiter, authenticateToken, upload.single('fil
 
 // Get statistics
 app.get('/api/stats', (req, res) => {
+  // Add timeout for database operations
+  const queryTimeout = setTimeout(() => {
+    if (!res.headersSent) {
+      res.status(504).json({ error: 'Database query timeout' });
+    }
+  }, 25000); // 25 second timeout for queries
+  
   db.get("SELECT COUNT(*) as total FROM blocked_users", (err, row) => {
+    clearTimeout(queryTimeout);
     if (err) {
-      return res.status(500).json({ error: err.message });
+      console.error('Database error in /api/stats:', err.message);
+      return res.status(500).json({ error: 'Database error' });
     }
     
     res.json({
-      totalUsers: row.total,
+      totalUsers: row?.total || 0,
       lastUpdated: new Date().toISOString()
     });
   });
